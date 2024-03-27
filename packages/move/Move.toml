@@ -1,0 +1,17 @@
+[package]
+name = "legato"
+version = "1.0.0"
+authors = []
+
+[addresses]
+legato_addr='7bf8c83deaef80763a95c2727e36815cb66282024814df39c6170ee6f04bdd37'
+aptos_framework = "0x1"
+
+[dev-addresses]
+
+[dependencies.AptosFramework]
+git = "https://github.com/aptos-labs/aptos-core.git"
+rev = "mainnet"
+subdir = "aptos-move/framework/aptos-framework"
+
+[dev-dependencies]
