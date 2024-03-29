@@ -8,6 +8,7 @@
       "bootstrap": "npm install; lerna bootstrap;",
       "start": "run-p --print-label package:*",
       "build": "lerna run --parallel build",
+      "dev" : "lerna run dev --scope client",
       "test": "lerna run test --concurrency 1 --stream --scope move"
     },
     "devDependencies": {
