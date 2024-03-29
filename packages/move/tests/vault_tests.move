@@ -59,7 +59,8 @@ module legato_addr::vault_tests {
 
         // mint APT for user_1, user_2
         account::create_account_for_test(signer::address_of(user_1));
-        account::create_account_for_test(signer::address_of(user_2));
+        account::create_account_for_test(signer::address_of(user_2)); 
+        account::create_account_for_test(signer::address_of(deployer)); 
 
         stake::mint(user_1, 100 * ONE_APT);
         stake::mint(user_2, 200 * ONE_APT); 
@@ -68,19 +69,53 @@ module legato_addr::vault_tests {
         assert!(coin::balance<AptosCoin>(signer::address_of(user_2)) == 200 * ONE_APT, 1);
 
         // stake for PT 
-        vault::mint<APR_2024>( user_1, 100 * ONE_APT, signer::address_of(validator) );
+        vault::mint<APR_2024>( user_1, 100 * ONE_APT);
+        vault::mint<APR_2024>( user_2, 200 * ONE_APT);
+
+        // perform internal process (obsolete when using the object model)
+        vault::internal_process_staking<APR_2024>( deployer, signer::address_of(validator) );
+
+        let i:u64=1;  
+        while(i <= 30) 
+        {
+            timestamp::fast_forward_seconds(epoch::duration());
+            end_epoch();
+            i=i+1;  //incrementing the counter
+        };
+
+        let pt_amount = vault::get_pt_balance<APR_2024>(signer::address_of(user_1));
+        
+        // check staked amount
+        let pool_address = dp::get_owned_pool_address(signer::address_of(validator) );
+        let (pool_staked_amount,_,_) = dp::get_stake(pool_address , signer::address_of(deployer) );
+        assert!( pool_staked_amount == 40035116288, 2);
+
+        // redeem 
+        vault::redeem<APR_2024>( user_1, pt_amount);
+
+        // perform internal process
+        vault::internal_process_unlock<APR_2024>( deployer, signer::address_of(validator), signer::address_of(user_1)  );
+
+        timestamp::fast_forward_seconds(epoch::duration());
+        end_epoch();
+
+        // perform internal process
+        vault::internal_process_withdraw<APR_2024>( deployer, signer::address_of(validator), signer::address_of(user_1)  );
+
+
+        // verify that the user has staked 100 APT and can now receive 100.41 APT after 30 epochs
+        let apt_amount = coin::balance<AptosCoin>(signer::address_of(user_1));
+        assert!( apt_amount == 10041095790, 3);
 
     }
 
     #[test_only]
     public fun setup_vaults(sender: &signer) {
-
         // matures in 30 epoch
         let maturity_date = timestamp::now_seconds()+(30*epoch::duration());
 
         // setup APR_2024 vault /w 5% APY
         vault::new_vault<APR_2024>(sender, 5000000, maturity_date);
-
     }
 
 
