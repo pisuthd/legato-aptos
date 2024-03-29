@@ -3,14 +3,13 @@
 // import Stake from "../components/Stake"
 
 import MainLayout from '@/layouts/mainLayout';
+import Panel from '@/components/Panel';
 
 export default function Home(props) {
 
   return (
-    <MainLayout>
-      {/* <Stake
-        {...props}
-      />  */}
+    <MainLayout bodyClassname="my-auto"> 
+      <Panel/>
     </MainLayout>
   )
 }
