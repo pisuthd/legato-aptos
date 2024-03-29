@@ -3,6 +3,8 @@
 #[test_only]
 module legato_addr::vault_tests {
 
+
+
     use std::features;
     use std::signer;
 
@@ -72,6 +74,10 @@ module legato_addr::vault_tests {
         vault::mint<APR_2024>( user_1, 100 * ONE_APT);
         vault::mint<APR_2024>( user_2, 200 * ONE_APT);
 
+        // getting ~100.41 PT today
+        let pt_amount = vault::get_pt_balance<APR_2024>(signer::address_of(user_1));
+        assert!( pool_staked_amount == 10041095890, 2);
+
         // perform internal process (obsolete when using the object model)
         vault::internal_process_staking<APR_2024>( deployer, signer::address_of(validator) );
 
@@ -83,12 +89,12 @@ module legato_addr::vault_tests {
             i=i+1;  //incrementing the counter
         };
 
-        let pt_amount = vault::get_pt_balance<APR_2024>(signer::address_of(user_1));
+        
         
         // check staked amount
         let pool_address = dp::get_owned_pool_address(signer::address_of(validator) );
         let (pool_staked_amount,_,_) = dp::get_stake(pool_address , signer::address_of(deployer) );
-        assert!( pool_staked_amount == 40035116288, 2);
+        assert!( pool_staked_amount == 40035116288, 3);
 
         // redeem 
         vault::redeem<APR_2024>( user_1, pt_amount);
@@ -105,7 +111,7 @@ module legato_addr::vault_tests {
 
         // verify that the user has staked 100 APT and can now receive 100.41 APT after 30 epochs
         let apt_amount = coin::balance<AptosCoin>(signer::address_of(user_1));
-        assert!( apt_amount == 10041095790, 3);
+        assert!( apt_amount == 10041095790, 4);
 
     }
 
