@@ -76,7 +76,7 @@ module legato_addr::vault_tests {
 
         // getting ~100.41 PT today
         let pt_amount = vault::get_pt_balance<APR_2024>(signer::address_of(user_1));
-        assert!( pool_staked_amount == 10041095890, 2);
+        assert!( pt_amount == 10041095890, 2);
 
         // perform internal process (obsolete when using the object model)
         vault::internal_process_staking<APR_2024>( deployer, signer::address_of(validator) );
