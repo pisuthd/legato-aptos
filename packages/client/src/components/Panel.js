@@ -60,7 +60,7 @@ const Panel = () => {
             <div class="wrapper p-2 mb-10">
                 <div className=" mx-auto max-w-lg">
                     <h5 class="text-2xl text-center text-white font-bold  my-3  ">
-                        Lock-in Staking
+                        Lock-in APT Staking
                     </h5>
                     <div class={` bg-gray-900 p-6 w-full border border-gray-700 rounded-2xl`}>
 
@@ -98,9 +98,6 @@ const Panel = () => {
                             </div>
                         </div>
 
-
-
-
                         <div className="text-xs font-medium text-gray-300 text-center py-4 pt-1 max-w-sm mx-auto">
                             You will receive  {Number(estimate).toFixed(3)} PT which can be redeemed for APTOS in full after April 30, 2024
                         </div>
@@ -116,6 +113,11 @@ const Panel = () => {
                         )}
 
 
+                    </div>
+                    <div className="max-w-lg ml-auto mr-auto">
+                        <p class="text-neutral-400 text-sm p-5 text-center">
+                            {`Legato on Aptos is still in development and available for access on the Aptos Testnet only`}
+                        </p>
                     </div>
                 </div>
             </div>
