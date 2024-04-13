@@ -26,4 +26,4 @@ npm run dev
 
 ## Deployment
 
-Aptos Testnet - https://explorer.aptoslabs.com/account/0x7bf8c83deaef80763a95c2727e36815cb66282024814df39c6170ee6f04bdd37/modules/code/vault?network=testnet
+Aptos Testnet - [https://explorer.aptoslabs.com/account/0x7bf8c83deaef80763a95c2727e36815cb66282024814df39c6170ee6f04bdd37/modules/code/vault?network=testnet](https://explorer.aptoslabs.com/account/0xb586d128941c1167ee7947fbec8949057f489661f52f08580d90b9831d8c7a9d/modules/code/amm?network=devnet)
