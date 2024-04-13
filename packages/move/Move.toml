@@ -4,7 +4,7 @@ version = "1.0.0"
 authors = []
 
 [addresses]
-legato_addr='7bf8c83deaef80763a95c2727e36815cb66282024814df39c6170ee6f04bdd37'
+legato_addr='b586d128941c1167ee7947fbec8949057f489661f52f08580d90b9831d8c7a9d'
 aptos_framework = "0x1"
 
 [dev-addresses]
