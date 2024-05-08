@@ -1,8 +1,8 @@
 
 
 #[test_only]
-module legato_addr::amm_tests { 
-      
+module legato_addr::amm_tests {
+
     use std::string::utf8;
     use std::signer;
 
@@ -17,34 +17,32 @@ module legato_addr::amm_tests {
 
     const ERR_UNKNOWN: u64 = 0;
 
-    #[test_only]
-    const USDT_AMOUNT : u64 = 20_000_000_000; // 20,000 USDT at 20%
+    // When setting up a 90/10 pool of ~$100k
+    // Initial allocation at 1 BTC = 50,000 USDT
 
     #[test_only]
-    const BTC_AMOUNT: u64 = 160_000_000;  // 1.6 BTC at 80%
+    const USDT_AMOUNT : u64 = 10_000_000_000; // 10,000 USDT at 10%
+
+    #[test_only]
+    const BTC_AMOUNT: u64 = 180_000_000;  // 1.8 BTC at 90%
 
     #[test(deployer = @legato_addr, lp_provider = @0xdead, user = @0xbeef )]
     fun test_register_pools(deployer: &signer, lp_provider: &signer, user: &signer) {
 
-        // 50,000 BTC/USD
         register_pools(deployer, lp_provider, user);
-        
-        // Add 10% from total liquidity.
-        add_liquidity( lp_provider, BTC_AMOUNT/10, USDT_AMOUNT/10);
-
+ 
     }
 
     #[test(deployer = @legato_addr, lp_provider = @0xdead, user = @0xbeef )]
     fun test_swap(deployer: &signer, lp_provider: &signer, user: &signer) {
 
-        // 50,000 BTC/USD
         register_pools(deployer, lp_provider, user);
         
         amm::swap<USDT, BTC>(user, 20_000_000, 1); // 20 USDT
 
         let user_address = signer::address_of(user);
         
-        assert!(coin::balance<BTC>(user_address) == 39575, ERR_UNKNOWN); // 0.00039575 BTC at 50536.955148452
+        assert!(coin::balance<BTC>(user_address) == 39754, ERR_UNKNOWN); // 0.00039754 BTC at ~50,536 BTC/USDT
     }
 
     #[test_only]
@@ -82,7 +80,7 @@ module legato_addr::amm_tests {
         coin::destroy_mint_cap(xbtc_mint_cap);
         assert!(coin::balance<BTC>(deployer_address) == BTC_AMOUNT, 2);
 
-        amm::register_pool<BTC, USDT>(deployer, 8000, 2000, 8, 6);
+        amm::register_pool<BTC, USDT>(deployer, 9000, 1000);
 
         amm::add_liquidity<BTC, USDT>(
             deployer,
@@ -95,25 +93,7 @@ module legato_addr::amm_tests {
         assert!(coin::balance<BTC>(deployer_address) == 0, ERR_UNKNOWN);
         assert!(coin::balance<USDT>(deployer_address) == 0, ERR_UNKNOWN);
         
-        assert!(coin::balance<LP<BTC, USDT>>(deployer_address) == 71_554_175_278_993, 3);
-
-    }
-
-    #[test_only]
-    public fun add_liquidity(lp_provider: &signer, x_amount: u64, y_amount: u64) {
-        
-        let lp_provider_address = signer::address_of(lp_provider);
-
-        amm::add_liquidity<BTC, USDT>(
-            lp_provider,
-            x_amount,
-            1,
-            y_amount,
-            1
-        );
- 
-        assert!(coin::balance<LP<BTC, USDT>>(lp_provider_address) == 1_684_807_902_915, 3);
-
+        assert!(coin::balance<LP<BTC, USDT>>(deployer_address) == 268_994_649, 3);
     }
 
     #[test_only]
@@ -136,6 +116,6 @@ module legato_addr::amm_tests {
         mint_cap
     }
 
-    
+     
 
 }

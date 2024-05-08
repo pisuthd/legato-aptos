@@ -1,8 +1,8 @@
 // Copyright (c) Tamago Blockchain Labs, Inc.
 // SPDX-License-Identifier: MIT
 
-// Legato AMM DEX enables trading vault tokens with settlement tokens like USDT or USDC.
-// Mainly forked from OmniBTC's AMM swap, which upgrades with custom weights.
+// Legato AMM DEX facilitates trading vault tokens with settlement tokens like USDT or USDC. 
+// It's an extension of OmniBTC's AMM swap, enhancing custom weights with math from Balance V2 Lite.
 
 module legato_addr::amm {
  
@@ -13,31 +13,31 @@ module legato_addr::amm {
  
     use aptos_framework::coin::{Self, Coin, MintCapability, BurnCapability}; 
     use aptos_framework::object::{Self, ExtendRef};
+
     use aptos_std::smart_vector::{Self, SmartVector};
     use aptos_std::math128;
     use aptos_std::comparator::{Self, Result};
     use aptos_std::type_info; 
+    use aptos_std::fixed_point64::{Self, FixedPoint64};
 
     use legato_addr::weighted_math;
 
     // ======== Constants ========
     
+    // Default swap fee of 0.5% in fixed-point
+    const DEFAULT_FEE: u128 = 92233720368547758; 
     /// Max u64 value.
     const U64_MAX: u64 = 18446744073709551615;
     /// The max value that can be held in one of the Balances of
-    /// a Pool. U64 MAX / FEE_SCALE
+    /// a Pool. U64 MAX / WEIGHT_SCALE
     const MAX_POOL_VALUE: u64 = { 18446744073709551615 / 10000 };
     /// Minimal liquidity.
-    const MINIMAL_LIQUIDITY: u64 = 1000;
-    /// Default fee is 1%
-    const DEFAULT_FEE_MULTIPLIER: u64 = 100;
-    /// The integer scaling setting for fees calculation and weights
-    const FEE_SCALE: u64 = 10000;
+    const MINIMAL_LIQUIDITY: u64 = 1000; 
+
+    const WEIGHT_SCALE: u64 = 10000;
     // Minimum APT required to stake.
     const MIN_APT_TO_STAKE: u64 = 100_000_000; // 1 APT
-    // Threshold to stake to delegator pool.
-    const THRESHOLD_TO_STAKE: u64 = 1_100_000_000; // 11 APT
-
+    
     const SYMBOL_PREFIX_LENGTH: u64 = 4;
 
     // ======== Errors ========
@@ -72,8 +72,8 @@ module legato_addr::amm {
         coin_y: Coin<Y>,
         weight_x: u64, // 50% using 5000
         weight_y: u64, // 50% using 5000
-        scaling_factor_x: u64,
-        scaling_factor_y: u64, 
+        min_liquidity: Coin<LP<X, Y>>,
+        swap_fee: FixedPoint64,
         lp_mint: MintCapability<LP<X, Y>>,
         lp_burn: BurnCapability<LP<X, Y>>
     }
@@ -82,7 +82,6 @@ module legato_addr::amm {
     struct AMMConfig has key { 
         pool_list: SmartVector<String>, // all pools in the system
         whitelist: SmartVector<address>, // who can setup a new pool
-        fee_multiplier: u64,
         extend_ref: ExtendRef,
         treasury_address: address // where all fees from all pools will be sent for further LP staking
     }
@@ -99,7 +98,6 @@ module legato_addr::amm {
         move_to(sender, AMMConfig { 
             whitelist , 
             pool_list: smart_vector::new(), 
-            fee_multiplier: DEFAULT_FEE_MULTIPLIER,
             extend_ref,
             treasury_address: signer::address_of(sender)
         });
@@ -108,13 +106,11 @@ module legato_addr::amm {
     // ======== Entry Points =========
 
 
-    // Registers a new liquidity pool with custom weights (only whitelist)
+    // Allows only authorized users to create liquidity with custom weights
     public entry fun register_pool<X, Y>(
         sender: &signer,
         weight_x: u64,
-        weight_y: u64,
-        decimal_x: u8,
-        decimal_y: u8,
+        weight_y: u64
     ) acquires AMMConfig {
         let is_order = is_order<X, Y>();
         assert!(is_order, ERR_MUST_BE_ORDER);
@@ -122,10 +118,10 @@ module legato_addr::amm {
         assert!(coin::is_coin_initialized<Y>(), ERR_NOT_COIN);
 
         let config = borrow_global_mut<AMMConfig>(@legato_addr);
+        // Ensure that the call is on the whitelist
         assert!( smart_vector::contains(&config.whitelist, &(signer::address_of(sender))) , ERR_UNAUTHORIZED);
         // Ensure that the normalized weights sum up to 100%
         assert!( weight_x+weight_y == 10000, ERR_WEIGHTS_SUM); 
-        assert!( weight_x % 1000 == 0 && weight_y % 1000 == 0, ERR_WEIGHTS_SUM); 
 
         let config_object_signer = object::generate_signer_for_extending(&config.extend_ref);
         let (lp_name, lp_symbol) = generate_lp_name_and_symbol<X, Y>();
@@ -133,6 +129,7 @@ module legato_addr::amm {
         let (lp_burn_cap, lp_freeze_cap, lp_mint_cap) = coin::initialize<LP<X, Y>>(sender, lp_name, lp_symbol, 8, true);
         coin::destroy_freeze_cap(lp_freeze_cap);
 
+        // Registers X and Y if not already registered
         if (!coin::is_account_registered<X>(signer::address_of(&config_object_signer))) {
             coin::register<X>(&config_object_signer)
         };
@@ -143,23 +140,23 @@ module legato_addr::amm {
 
         let pool = Pool<X, Y> {
             coin_x: coin::zero<X>(),
-            coin_y: coin::zero<Y>(),
-            weight_x,
-            weight_y,
-            scaling_factor_x: compute_scaling_factor(decimal_x),
-            scaling_factor_y: compute_scaling_factor(decimal_y),
+            coin_y: coin::zero<Y>(), 
             lp_mint: lp_mint_cap,
             lp_burn: lp_burn_cap,
+            weight_x,
+            weight_y,
+            min_liquidity: coin::zero<LP<X,Y>>(),
+            swap_fee: fixed_point64::create_from_raw_value( DEFAULT_FEE )
         };
         move_to(&config_object_signer, pool);
 
         smart_vector::push_back(&mut config.pool_list, lp_symbol);
 
-        // emit event
+        // TODO: emit event
 
     }
 
-      /// Entrypoint for the `add_liquidity` method.
+    /// Entrypoint for the `add_liquidity` method.
     /// Sends `LP<X,Y>` to the transaction sender.
     public entry fun add_liquidity<X, Y>(
         lp_provider: &signer, 
@@ -168,7 +165,9 @@ module legato_addr::amm {
         coin_y_amount: u64,
         coin_y_min: u64
     ) acquires AMMConfig, Pool {
-        // let is_order = is_order<X, Y>();
+        let is_order = is_order<X, Y>();
+        assert!(is_order, ERR_MUST_BE_ORDER);
+
         assert!(coin::is_coin_initialized<X>(), ERR_NOT_COIN);
         assert!(coin::is_coin_initialized<Y>(), ERR_NOT_COIN);
 
@@ -178,7 +177,7 @@ module legato_addr::amm {
 
         let (optimal_x, optimal_y) = calc_optimal_coin_values<X, Y>(
             coin_x_amount,
-            coin_y_amount,
+            coin_y_amount
         );
 
         let (reserves_x, reserves_y) = get_reserves_size<X, Y>();
@@ -190,6 +189,7 @@ module legato_addr::amm {
         let coin_y_opt = coin::withdraw<Y>(lp_provider, optimal_y);
 
         let lp_coins = mint_lp<X, Y>(
+            lp_provider, 
             coin_x_opt,
             coin_y_opt,
             optimal_x,
@@ -204,7 +204,44 @@ module legato_addr::amm {
         };
         coin::deposit(lp_provider_address, lp_coins);
 
-        // emit event
+        // TODO: emit event
+    }
+
+    /// Entrypoint for the `remove_liquidity` method.
+    /// Transfers Coin<X> and Coin<Y> to the sender.
+    public entry fun remove_liquidity<X, Y>( 
+        lp_provider: &signer, 
+        lp_amount: u64
+    ) acquires AMMConfig, Pool {
+        let is_order = is_order<X, Y>();
+        assert!(is_order, ERR_MUST_BE_ORDER);
+
+        assert!(coin::is_coin_initialized<LP<X,Y>>(), ERR_NOT_COIN);
+
+        let config = borrow_global_mut<AMMConfig>(@legato_addr);
+        let (_, lp_symbol) = generate_lp_name_and_symbol<X, Y>();
+        assert!( smart_vector::contains(&config.pool_list, &lp_symbol) , ERR_POOL_EXISTS);
+        
+        let config_object_signer = object::generate_signer_for_extending(&config.extend_ref);
+        let pool_address = signer::address_of(&config_object_signer);
+        assert!(exists<Pool<X, Y>>(pool_address), ERR_POOL_EXISTS);
+
+        let (reserves_x, reserves_y) = get_reserves_size<X, Y>();
+        let lp_coins_total = option::extract(&mut coin::supply<LP<X, Y>>());
+        let pool = borrow_global_mut<Pool<X, Y>>(pool_address);
+
+        let (coin_x_out, coin_y_out) = weighted_math::compute_withdrawn_coins( 
+            lp_amount, 
+            (lp_coins_total as u64), 
+            reserves_x, 
+            reserves_y, 
+            pool.weight_x, 
+            pool.weight_y
+        ); 
+
+        // TODO: complete this
+
+
     }
 
     /// Entry point for the `swap` method.
@@ -261,7 +298,7 @@ module legato_addr::amm {
     /// Returns both `X` and `Y` coins amounts.
     public fun calc_optimal_coin_values<X, Y>(
         x_desired: u64,
-        y_desired: u64,
+        y_desired: u64
     ): (u64, u64) acquires Pool, AMMConfig   {
         let (reserves_x, reserves_y) = get_reserves_size<X, Y>();
 
@@ -273,11 +310,13 @@ module legato_addr::amm {
         if (reserves_x == 0 && reserves_y == 0) {
             return (x_desired, y_desired)
         } else {
-            let y_returned = weighted_math::get_amount_out(x_desired, reserves_x,  pool.weight_x, pool.scaling_factor_x, reserves_y, pool.weight_y, pool.scaling_factor_y);
+            
+            let y_returned = weighted_math::compute_optimal_value(x_desired, reserves_x, reserves_y, pool.weight_y);
+
             if (y_returned <= y_desired) {
                 return (x_desired, y_returned)
             } else {
-                let x_returned =  weighted_math::get_amount_out(y_desired, reserves_y,  pool.weight_y, pool.scaling_factor_y, reserves_x, pool.weight_x, pool.scaling_factor_x);
+                let x_returned =  weighted_math::compute_optimal_value(y_desired, reserves_y, reserves_x, pool.weight_x);
                 assert!(x_returned <= x_desired, ERR_OVERLIMIT_X);
                 return (x_returned, y_desired)
             }
@@ -313,20 +352,17 @@ module legato_addr::amm {
         
         let config_object_signer = object::generate_signer_for_extending(&config.extend_ref);
         let pool_address = signer::address_of(&config_object_signer);
-        let current_fee = config.fee_multiplier;
 
         let pool = borrow_global_mut<Pool<X, Y>>(pool_address);
 
-        let (coin_x_after_fees, coin_x_fee) = weighted_math::get_fee_to_treasury( current_fee , coin_in_value);
+        let (coin_x_after_fees, coin_x_fee) = weighted_math::get_fee_to_treasury( pool.swap_fee , coin_in_value);
 
         let coin_y_out = weighted_math::get_amount_out(
             coin_x_after_fees,
             reserve_in,
             pool.weight_x,
-            pool.scaling_factor_x,
             reserve_out,
-            pool.weight_y,
-            pool.scaling_factor_y
+            pool.weight_y
         );
         assert!(
             coin_y_out >= coin_out_min_value,
@@ -360,20 +396,17 @@ module legato_addr::amm {
         
         let config_object_signer = object::generate_signer_for_extending(&config.extend_ref);
         let pool_address = signer::address_of(&config_object_signer);
-        let current_fee = config.fee_multiplier;
 
         let pool = borrow_global_mut<Pool<X, Y>>(pool_address);
 
-        let (coin_y_after_fees, coin_y_fee) =  weighted_math::get_fee_to_treasury( current_fee , coin_in_value);
+        let (coin_y_after_fees, coin_y_fee) =  weighted_math::get_fee_to_treasury( pool.swap_fee , coin_in_value);
 
         let coin_x_out = weighted_math::get_amount_out(
             coin_y_after_fees,
             reserve_in,
             pool.weight_y,
-            pool.scaling_factor_y,
             reserve_out,
-            pool.weight_x,
-            pool.scaling_factor_x
+            pool.weight_x
         );
 
         assert!(
@@ -420,13 +453,51 @@ module legato_addr::amm {
         smart_vector::swap_remove<address>(&mut config.whitelist, idx );
     }
 
-    // update fee 
-    public entry fun update_fee(sender: &signer, new_fee: u64) acquires AMMConfig {
+    // update treasury address
+    public entry fun update_treasury_address(sender: &signer, new_address: address) acquires AMMConfig {
         assert!( signer::address_of(sender) == @legato_addr , ERR_UNAUTHORIZED);
         let config = borrow_global_mut<AMMConfig>(@legato_addr);
-        assert!( new_fee >= 10 && new_fee < 1000 , ERR_INVALID_FEE);
-        config.fee_multiplier = new_fee;
+        config.treasury_address = new_address;
     }
+
+    // update fee 
+    public entry fun update_fee<X,Y>(sender: &signer, fee_numerator: u128, fee_denominator: u128) acquires AMMConfig, Pool {
+        let is_order = is_order<X, Y>();
+        assert!(is_order, ERR_MUST_BE_ORDER);
+        assert!( signer::address_of(sender) == @legato_addr , ERR_UNAUTHORIZED);
+
+        let config = borrow_global_mut<AMMConfig>(@legato_addr); 
+
+        let (_, lp_symbol) = generate_lp_name_and_symbol<X, Y>();
+        assert!( smart_vector::contains(&config.pool_list, &lp_symbol) , ERR_POOL_EXISTS);
+        
+        let config_object_signer = object::generate_signer_for_extending(&config.extend_ref);
+        let pool_address = signer::address_of(&config_object_signer); 
+
+        let pool = borrow_global_mut<Pool<X, Y>>(pool_address);
+        pool.swap_fee = fixed_point64::create_from_rational( fee_numerator, fee_denominator );
+    }
+
+    // update weights
+    public entry fun update_weights<X,Y>(sender: &signer, weight_x: u64, weight_y: u64) acquires AMMConfig, Pool {
+        let is_order = is_order<X, Y>();
+        assert!(is_order, ERR_MUST_BE_ORDER);
+        assert!( signer::address_of(sender) == @legato_addr , ERR_UNAUTHORIZED);
+        assert!( weight_x+weight_y == 10000, ERR_WEIGHTS_SUM); 
+
+        let config = borrow_global_mut<AMMConfig>(@legato_addr); 
+
+        let (_, lp_symbol) = generate_lp_name_and_symbol<X, Y>();
+        assert!( smart_vector::contains(&config.pool_list, &lp_symbol) , ERR_POOL_EXISTS);
+        
+        let config_object_signer = object::generate_signer_for_extending(&config.extend_ref);
+        let pool_address = signer::address_of(&config_object_signer); 
+
+        let pool = borrow_global_mut<Pool<X, Y>>(pool_address);
+        pool.weight_x = weight_x;
+        pool.weight_y = weight_y;
+    }
+
 
     // ======== Internal Functions =========
 
@@ -461,6 +532,7 @@ module legato_addr::amm {
 
     // mint LP tokens
     fun mint_lp<X, Y>(
+        lp_provider: &signer, 
         coin_x: Coin<X>,
         coin_y: Coin<Y>,
         optimal_x: u64,
@@ -479,38 +551,33 @@ module legato_addr::amm {
         let x_provided_val = coin::value<X>(&coin_x);
         let y_provided_val = coin::value<Y>(&coin_y);
 
+        // Retrieves total LP coins supply
         let lp_coins_total = option::extract(&mut coin::supply<LP<X, Y>>());
+
+        // Computes provided liquidity
         let provided_liq = if (0 == lp_coins_total) { 
-            let initial_liq = weighted_math::compute_initial_lp( pool.weight_x,  pool.weight_y,  pool.scaling_factor_x,  pool.scaling_factor_y,  x_provided_val, y_provided_val);
+            let initial_liq = weighted_math::compute_initial_lp( pool.weight_x,  pool.weight_y, x_provided_val, y_provided_val);
             assert!(initial_liq > MINIMAL_LIQUIDITY, ERR_LP_NOT_ENOUGH);
+
+            coin::merge(&mut pool.min_liquidity, coin::mint<LP<X, Y>>(MINIMAL_LIQUIDITY, &pool.lp_mint) );
+
             initial_liq - MINIMAL_LIQUIDITY
         } else {
 
-            let x_liq = weighted_math::compute_derive_lp( (lp_coins_total as u64), optimal_x, pool.scaling_factor_x, coin_x_reserve );
-            let y_liq = weighted_math::compute_derive_lp( (lp_coins_total as u64), optimal_y, pool.scaling_factor_y, coin_y_reserve );
-
-            if (x_liq < y_liq) {
-                assert!(x_liq < (U64_MAX as u128), ERR_U64_OVERFLOW);
-                (x_liq as u64)
-            } else {
-                assert!(y_liq < (U64_MAX as u128), ERR_U64_OVERFLOW);
-                (y_liq as u64)
-            }  
+            let (x_liq, y_liq) = weighted_math::compute_derive_lp( optimal_x, optimal_y, pool.weight_x, pool.weight_y, coin_x_reserve, coin_y_reserve, (lp_coins_total as u64) );
+    
+            (x_liq + y_liq)    
         };
 
+        // Merges provided coins into pool
         coin::merge(&mut pool.coin_x, coin_x);
         coin::merge(&mut pool.coin_y, coin_y);
 
         assert!(coin::value(&pool.coin_x) < MAX_POOL_VALUE, ERR_POOL_FULL);
         assert!(coin::value(&pool.coin_y) < MAX_POOL_VALUE, ERR_POOL_FULL);
 
-        // emit event
-
-        let lp_coins = coin::mint<LP<X, Y>>(provided_liq, &pool.lp_mint);
-
-
-
-        lp_coins
+        // Mints LP tokens
+        coin::mint<LP<X, Y>>(provided_liq, &pool.lp_mint)
     }
 
     fun coin_symbol_prefix<CoinType>(): String {
@@ -520,10 +587,6 @@ module legato_addr::amm {
             prefix_length = string::length(&symbol);
         };
         string::sub_string(&symbol, 0, prefix_length)
-    }
-
-    fun compute_scaling_factor(decimal: u8): u64 { 
-        (math128::pow(10, (8-decimal as u128)) as u64)
     }
 
     // ======== Test-related Functions =========
