@@ -1,3 +1,8 @@
+// Copyright (c) Tamago Blockchain Labs, Inc.
+// SPDX-License-Identifier: MIT
+
+// A timelock vault to convert APT into future value including yield tokenization for general purposes. 
+// Each vault maintains its own tokens and adheres to a quarterly expiration schedule.
 
 
 module legato_addr::vault {
@@ -12,46 +17,63 @@ module legato_addr::vault {
     use aptos_framework::coin::{Self, Coin, MintCapability, BurnCapability}; 
     use aptos_std::smart_vector::{Self, SmartVector};
     use aptos_std::type_info;   
+    use aptos_std::fixed_point64::{Self, FixedPoint64};
+    use aptos_std::math_fixed64::{Self};
+    use aptos_std::table::{Self, Table};
+
     use legato_addr::epoch;
 
     // ======== Constants ========
 
-    const MIN_APT_TO_STAKE: u64 = 100000000;
+    const MIN_APT_TO_STAKE: u64 = 100000000; // 1 APT
+    
+    const DEFAULT_EXIT_FEE: u128 = 553402322211286548; // 3% in fixed-point
+    const DEFAULT_BATCH_AMOUNT: u64 = 1500000000; // 15 APT
 
     // ======== Errors ========
 
-    const E_UNAUTHORIZED: u64 = 1;
-    const E_INVALID_MATURITY: u64 = 2;
-    const E_VAULT_EXISTS: u64 = 3;
-    const E_VAULT_MATURED: u64 = 4;
-    const E_MIN_THRESHOLD: u64 = 5;
-    const E_INVALID_VAULT: u64 = 6;
-    const E_FULL_VALIDATOR: u64 = 7;
-    const E_INSUFFICIENT_APT_LOCKED: u64 = 8;
-    const E_VAULT_NOT_MATURED: u64 = 9;
+    const ERR_UNAUTHORIZED: u64 = 101;
+    const ERR_INVALID_MATURITY: u64 = 102;
+    const ERR_VAULT_EXISTS: u64 = 103;
+    const ERR_VAULT_MATURED: u64 = 104;
+    const ERR_MIN_THRESHOLD: u64 = 105;
+    const ERR_INVALID_VAULT: u64 = 106;  
+    const ERR_VAULT_NOT_MATURED: u64 = 107;
+    const ERR_INVALID_ADDRESS: u64 = 108;
+    const ERR_INVALID_TYPE: u64 = 109;
 
     // ======== Structs =========
 
     // represent the future value at maturity date
     struct PT_TOKEN<phantom P> has drop {}
 
-    struct PoolReserve<phantom P> has key {
-        pt_locked: Coin<PT_TOKEN<P>>,
+    struct VaultReserve<phantom P> has key { 
         pt_mint: MintCapability<PT_TOKEN<P>>,
-        pt_burn: BurnCapability<PT_TOKEN<P>>,
-        apt_locked: u64,
-        pending_withdrawal: u64,
-        vault_apy: u64,
-        unlock_time_secs: u64,
-        debt_balance: u64
+        pt_burn: BurnCapability<PT_TOKEN<P>>,  
+        pt_total_supply: u64,  // Total supply of PT tokens
     }
 
-    struct Config has key { 
-        /// Whitelist of validators
-        whitelist: SmartVector<address>,
-        extend_ref: ExtendRef
+    struct VaultConfig has store { 
+        maturity_time: u64,
+        vault_apy: FixedPoint64, // Vault's APY based on the average rate
+        enable_mint: bool, 
+        enable_exit: bool,
+        enable_redeem: bool
     }
 
+    struct VaultManager has key {  
+        delegator_pools: SmartVector<address>, // Supported delegator pools
+        vault_list: SmartVector<String>,  // List of all vaults in the system
+        vault_config: Table<String, VaultConfig>,
+        extend_ref: ExtendRef, // self-sovereight identity
+        pending_stake: u64, // Pending stake
+        pending_unstake: Table<address, u64>, 
+        unlocked_amount: u64,
+        pending_withdrawal: Table<address, u64>,
+        requesters: SmartVector<address>,
+        batch_amount: u64,
+        exit_fee: FixedPoint64 
+    }
 
     // constructor
     fun init_module(sender: &signer) {
@@ -59,73 +81,137 @@ module legato_addr::vault {
         let constructor_ref = object::create_object(signer::address_of(sender));
         let extend_ref = object::generate_extend_ref(&constructor_ref);
 
-        move_to(sender, Config { whitelist: smart_vector::new(), extend_ref});
+        move_to(sender, VaultManager { 
+            delegator_pools: smart_vector::new<address>(), 
+            vault_list: smart_vector::new<String>(),
+            vault_config: table::new<String, VaultConfig>(),
+            extend_ref, 
+            pending_stake: 0,
+            unlocked_amount: 0,
+            pending_unstake: table::new<address, u64>(),
+            pending_withdrawal: table::new<address, u64>(),
+            requesters: smart_vector::new<address>(), 
+            batch_amount: DEFAULT_BATCH_AMOUNT,
+            exit_fee: fixed_point64::create_from_raw_value(DEFAULT_EXIT_FEE)
+        });
     }
     
     // ======== Public Functions =========
+ 
 
-    // locks APT in the timelock vault and mints PT equivalent to the value at the maturity date
-    public entry fun mint<P>(sender: &signer, validator_address: address, input_amount: u64) acquires PoolReserve, Config {
-        assert!(exists<PoolReserve<P>>(@legato_addr), E_INVALID_VAULT);
-        assert!(coin::balance<AptosCoin>(signer::address_of(sender)) >= MIN_APT_TO_STAKE, E_MIN_THRESHOLD);
-        assert!(is_whitelisted(validator_address), E_INVALID_VAULT);
+    // Convert APT into future PT tokens equivalent to the value at the maturity date.
+    public entry fun mint<P>(sender: &signer, input_amount: u64) acquires VaultReserve, VaultManager {
+        assert!(exists<VaultReserve<P>>(@legato_addr), ERR_INVALID_VAULT);
+        assert!(coin::balance<AptosCoin>(signer::address_of(sender)) >= MIN_APT_TO_STAKE, ERR_MIN_THRESHOLD);
 
-        let reserve = borrow_global_mut<PoolReserve<P>>(@legato_addr); 
+        let type_name = type_info::type_name<P>();
 
-        assert!(reserve.unlock_time_secs > timestamp::now_seconds() , E_VAULT_MATURED); 
-
-        let config = borrow_global_mut<Config>(@legato_addr);
+        let config = borrow_global_mut<VaultManager>(@legato_addr);
         let config_object_signer = object::generate_signer_for_extending(&config.extend_ref);
+
+        let vault_config = table::borrow_mut( &mut config.vault_config, type_name );        
+        let vault_reserve = borrow_global_mut<VaultReserve<P>>(@legato_addr); 
         
-        // send to object 
+        // Ensure that the vault has not yet matured
+        assert!(vault_config.maturity_time > timestamp::now_seconds() , ERR_VAULT_MATURED); 
+
+        // attaches to object 
         let input_coin = coin::withdraw<AptosCoin>(sender, input_amount);
         if (!coin::is_account_registered<AptosCoin>(signer::address_of(&config_object_signer))) {
             coin::register<AptosCoin>(&config_object_signer);
         };
+
         coin::deposit(signer::address_of(&config_object_signer), input_coin);
 
-        // stake APT for the given amount in the delegation pool
-        let pool_address = dp::get_owned_pool_address(validator_address);
-        dp::add_stake(&config_object_signer, pool_address, input_amount);
+        // Update the pending stake amount 
+        config.pending_stake = config.pending_stake+input_amount;
 
-        // calculate PT to send out
-        let debt_amount = calculate_pt_debt(reserve.vault_apy, timestamp::now_seconds(), reserve.unlock_time_secs, input_amount);
+        // Calculate the amount of PT tokens to be sent out 
+        let pt_amount = calculate_pt_debt_amount( vault_config.vault_apy, timestamp::now_seconds(), vault_config.maturity_time, input_amount );
+        let debt_amount = pt_amount-input_amount;
 
-        // Mint PT tokens and deposit into the sender's account
-        let pt_coin = coin::mint<PT_TOKEN<P>>(input_amount+debt_amount, &reserve.pt_mint); 
+        // Mint PT tokens and deposit them into the sender's account
+        let pt_coin = coin::mint<PT_TOKEN<P>>(pt_amount, &vault_reserve.pt_mint); 
         if (!coin::is_account_registered<PT_TOKEN<P>>(signer::address_of(sender))) {
             coin::register<PT_TOKEN<P>>(sender);
         };
         coin::deposit(signer::address_of(sender), pt_coin);
 
-        reserve.debt_balance = reserve.debt_balance+debt_amount;
-        reserve.apt_locked = reserve.apt_locked+input_amount;
+        // Update 
+        vault_reserve.pt_total_supply = vault_reserve.pt_total_supply+pt_amount;
+
+        transfer_stake();
+
+        // emit event
     }
 
-    // redeem when the vault reaches its maturity date
-    public entry fun redeem<P>(sender: &signer, validator_address: address,  amount: u64) acquires PoolReserve, Config {
-        assert!(exists<PoolReserve<P>>(@legato_addr), E_INVALID_VAULT);
-        assert!(is_whitelisted(validator_address), E_INVALID_VAULT);
+    // Check if the APT in pending_stake meets the BATCH_AMOUNT, then use it to stake on a randomly supported validator.
+    public entry fun transfer_stake() acquires VaultManager {
+        let config = borrow_global_mut<VaultManager>(@legato_addr);
+        if (config.pending_stake >= config.batch_amount) { 
+            
+            let config_object_signer = object::generate_signer_for_extending(&config.extend_ref);
 
-        let config = borrow_global_mut<Config>(@legato_addr);
+            let validator_index = timestamp::now_seconds() % smart_vector::length( &config.delegator_pools );
+            let validator_address = *smart_vector::borrow( &config.delegator_pools, validator_index );
+            let pool_address = dp::get_owned_pool_address(validator_address);
+            dp::add_stake(&config_object_signer, pool_address, config.pending_stake);
+
+            config.pending_stake = 0;
+ 
+        };
+    }
+ 
+
+    // request redeem when the vault reaches its maturity date
+    public entry fun request_redeem<P>( sender: &signer, amount: u64 ) acquires VaultReserve, VaultManager {
+        assert!(exists<VaultReserve<P>>(@legato_addr), ERR_INVALID_VAULT);
+
+        let type_name = type_info::type_name<P>();
+
+        let config = borrow_global_mut<VaultManager>(@legato_addr);
         let config_object_signer = object::generate_signer_for_extending(&config.extend_ref);
 
-        let reserve = borrow_global_mut<PoolReserve<P>>(@legato_addr); 
-        assert!(timestamp::now_seconds() > reserve.unlock_time_secs, E_VAULT_NOT_MATURED);
-        assert!(reserve.pending_withdrawal >= amount, E_INSUFFICIENT_APT_LOCKED);
+        let vault_config = table::borrow_mut( &mut config.vault_config, type_name );        
+        let vault_reserve = borrow_global_mut<VaultReserve<P>>(@legato_addr); 
 
-        // Withdraw PT tokens from the sender's account
+        // Check if the vault has matured
+        assert!(timestamp::now_seconds() > vault_config.maturity_time, ERR_VAULT_NOT_MATURED);
+
+        // Burn PT tokens on the sender's account
         let pt_coin = coin::withdraw<PT_TOKEN<P>>(sender, amount);
-        coin::burn(pt_coin, &reserve.pt_burn);
+        coin::burn(pt_coin, &vault_reserve.pt_burn);
+
+        // Add the request to the withdrawal list
+        table::add(
+            &mut config.pending_unstake,
+            signer::address_of(sender),
+            amount
+        );
+
+        if ( !smart_vector::contains(&config.requesters, &(signer::address_of(sender))) ) {
+            smart_vector::push_back(&mut config.requesters, signer::address_of(sender));
+        };
+
+        // Update
+        vault_reserve.pt_total_supply = vault_reserve.pt_total_supply-amount;
+
+        // emit event
+    }
+
+
+    // Calculate the amount of PT debt to be sent out using the formula P = S * e^(rt)
+    public fun calculate_pt_debt_amount(apy: FixedPoint64, from_timestamp: u64, to_timestamp: u64, input_amount: u64): u64 {
         
-        // withdraw from dp
-        let pool_address = dp::get_owned_pool_address(validator_address);
-        dp::withdraw(&config_object_signer, pool_address, amount);
+        // Calculate time duration in years
+        let time = fixed_point64::create_from_rational( ((to_timestamp-from_timestamp) as u128), 31556926 );
 
-        let apt_coin = coin::withdraw<AptosCoin>(&config_object_signer, amount-100);
-        coin::deposit(signer::address_of(sender), apt_coin);
+        // Calculate rt (rate * time)
+        let rt = math_fixed64::mul_div( apy, time, fixed_point64::create_from_u128(1));
+        let multiplier = math_fixed64::exp(rt);
 
-        reserve.pending_withdrawal = reserve.pending_withdrawal-amount;
+        // the final PT debt amount
+        ( fixed_point64::multiply_u128( (input_amount as u128), multiplier  ) as u64 )
     }
 
     #[view]
@@ -135,117 +221,215 @@ module legato_addr::vault {
     }
 
     #[view]
-    public fun get_config_object_address() : address  acquires Config  {
-        let config = borrow_global_mut<Config>(@legato_addr);
+    public fun get_config_object_address() : address  acquires VaultManager  {
+        let config = borrow_global_mut<VaultManager>(@legato_addr);
         let config_object_signer = object::generate_signer_for_extending(&config.extend_ref);
         signer::address_of(&config_object_signer)
     }
 
     // ======== Only Governance =========
 
-    // creates a timelock vault 
-    public entry fun new_vault<P>(
-        sender: &signer,
-        vault_apy: u64, 
-        unlock_time_secs: u64
-    )  {
-        assert!( signer::address_of(sender) == @legato_addr , E_UNAUTHORIZED);
-        // Maturity date should not be passed
-        assert!(unlock_time_secs > timestamp::now_seconds()+epoch::duration(), E_INVALID_MATURITY);
-        // Check if the vault already exists 
-        assert!(!vault_exist<P>(@legato_addr), E_VAULT_EXISTS);
 
-        // let config = borrow_global_mut<Config>(@legato_addr);
+    // Create a new vault
+    public entry fun new_vault<P>(
+        sender: &signer, 
+        maturity_time: u64,
+        apy_numerator: u128,
+        apy_denominator: u128
+    ) acquires VaultManager { 
+        assert!( signer::address_of(sender) == @legato_addr , ERR_UNAUTHORIZED);
+        // Check if the vault already exists 
+        assert!(!vault_exist<P>(@legato_addr), ERR_VAULT_EXISTS);
+        // The maturity date should not have passed.
+        assert!(maturity_time > timestamp::now_seconds()+epoch::duration(), ERR_INVALID_MATURITY);
+        // Ensure the current maturity date is greater than that of the previous vault.
+        assert_maturity_time<P>(@legato_addr, maturity_time);
+
+        let config = borrow_global_mut<VaultManager>(@legato_addr);
         // let config_object_signer = object::generate_signer_for_extending(&config.extend_ref);
 
-        // FIXME: generate symbol name from type
-        // let token_symbol = type_info::type_name<P>();
-        // let index = string::index_of(&token_symbol, &utf8(b"vault_maturity_dates::"));
+        // Construct the name and symbol of the PT token
+        let type_name = type_info::type_name<P>();
+        let index = string::index_of(&type_name, &utf8(b"vault_token_name::"));
+        assert!(index != string::length(&type_name) , ERR_INVALID_TYPE );
+        let token_name = string::utf8(b"PT-");
+        let token_symbol =  string::sub_string( &type_name, index+18, string::length(&type_name));
+        string::append( &mut token_name, token_symbol);
 
-        // string::sub_string(&token_symbol, index, string::length(&token_symbol));
-        let symbol = string::utf8(b"PT-TOKEN");
-
-        // Initialize vault token 
-        let (pt_burn, lp_freeze, pt_mint) = coin::initialize<PT_TOKEN<P>>(
+        // Initialize vault's PT token 
+        let (pt_burn, freeze_cap, pt_mint) = coin::initialize<PT_TOKEN<P>>(
             sender,
-            symbol,
-            symbol,
+            token_name,
+            token_symbol,
             8, // Number of decimal places
             true, // token is fungible
         );
 
-        coin::destroy_freeze_cap(lp_freeze);
+        coin::destroy_freeze_cap(freeze_cap);
+
+        let vault_config = VaultConfig { 
+            maturity_time,
+            vault_apy: fixed_point64::create_from_rational( apy_numerator, apy_denominator ),
+            enable_mint: true,
+            enable_redeem: true,
+            enable_exit: true
+        };
 
         move_to(
             sender,
-            PoolReserve<P> {
-                pt_locked: coin::zero<PT_TOKEN<P>>(),
+            VaultReserve<P> {
                 pt_mint,
-                pt_burn,
-                apt_locked: 0,
-                pending_withdrawal: 0,
-                vault_apy,
-                unlock_time_secs,
-                debt_balance: 0
+                pt_burn, 
+                pt_total_supply: 0
             },
         );
 
+        // Add the vault name to the list.
+        smart_vector::push_back(&mut config.vault_list, type_name);
+
+        // Add the configuration to the config table.
+        table::add(
+            &mut config.vault_config,
+            type_name,
+            vault_config
+        );
+
+        // emit event
+
     }
 
-    // add validator
-    public entry fun add_whitelist_validator(sender: &signer, validator_address: address) acquires Config {
-        assert!( signer::address_of(sender) == @legato_addr , E_UNAUTHORIZED);
-        let config = borrow_global_mut<Config>(@legato_addr);
-        assert!( smart_vector::length(&config.whitelist) == 0 , E_FULL_VALIDATOR); // only 1 validator allowed
-        smart_vector::push_back(&mut config.whitelist, validator_address);
+    // Update the batch amount for staking.
+    public entry fun update_batch_amount(sender: &signer, new_amount: u64) acquires VaultManager {
+        assert!( signer::address_of(sender) == @legato_addr , ERR_UNAUTHORIZED);
+        let config = borrow_global_mut<VaultManager>(@legato_addr);
+        config.batch_amount = new_amount;
     }
 
-    // admin should trigger unlock all APT staked
-    public entry fun unlock<P>(sender: &signer, validator_address: address) acquires PoolReserve, Config {
-        assert!( signer::address_of(sender) == @legato_addr , E_UNAUTHORIZED);
-        assert!(exists<PoolReserve<P>>(@legato_addr), E_INVALID_VAULT);
-        assert!(is_whitelisted(validator_address), E_INVALID_VAULT);
-        
-        let reserve = borrow_global_mut<PoolReserve<P>>(@legato_addr); 
-        assert!(timestamp::now_seconds() > reserve.unlock_time_secs, E_VAULT_NOT_MATURED);
-        assert!( reserve.apt_locked >= MIN_APT_TO_STAKE, E_INSUFFICIENT_APT_LOCKED );
+    // Add a validator to the whitelist.
+    public entry fun add_whitelist(sender: &signer, whitelist_address: address) acquires VaultManager {
+        assert!( signer::address_of(sender) == @legato_addr , ERR_UNAUTHORIZED);
+        let config = borrow_global_mut<VaultManager>(@legato_addr);
+        smart_vector::push_back(&mut config.delegator_pools, whitelist_address);
+    }
 
-        let config = borrow_global_mut<Config>(@legato_addr);
+    // Remove a validator from the whitelist.
+    public entry fun remove_whitelist(sender: &signer, whitelist_address: address) acquires VaultManager {
+        assert!( signer::address_of(sender) == @legato_addr , ERR_UNAUTHORIZED);
+        let config = borrow_global_mut<VaultManager>(@legato_addr);
+        let (found, idx) = smart_vector::index_of<address>(&config.delegator_pools, &whitelist_address);
+        assert!(  found , ERR_INVALID_ADDRESS);
+        smart_vector::swap_remove<address>(&mut config.delegator_pools, idx );
+    }
+
+    // Admin proceeds to unlock APT for further withdrawal according to the request table.
+    public entry fun admin_proceed_unstake(sender: &signer, validator_address: address) acquires VaultManager {
+        assert!( signer::address_of(sender) == @legato_addr , ERR_UNAUTHORIZED);
+
+        let config = borrow_global_mut<VaultManager>(@legato_addr);
         let config_object_signer = object::generate_signer_for_extending(&config.extend_ref);
+        let total_requester = smart_vector::length( &config.requesters );
+        
+        if (total_requester > 0) {
 
-        let pool_address = dp::get_owned_pool_address(validator_address);
-        dp::unlock(&config_object_signer, pool_address, reserve.apt_locked);
+            let requester_count = 0;
+            let total_unlock = 0;
 
-        reserve.pending_withdrawal = reserve.pending_withdrawal+reserve.apt_locked;
-        reserve.apt_locked = 0;
+            while ( requester_count < total_requester) {
+                let requester_address = *smart_vector::borrow( &config.requesters, requester_count );
+                let unlock_amount = table::remove( &mut config.pending_unstake, requester_address);
+
+                if (unlock_amount > 0) {
+                    table::add(
+                        &mut config.pending_withdrawal,
+                        requester_address,
+                        unlock_amount
+                    );
+
+                    total_unlock = total_unlock+unlock_amount;
+                };
+
+                requester_count = requester_count+1;
+            };
+
+            let pool_address = dp::get_owned_pool_address(validator_address);
+            dp::unlock(&config_object_signer, pool_address, total_unlock);
+
+            config.unlocked_amount = config.unlocked_amount + total_unlock;
+        };
+        
     }
 
+    // Admin proceeds with withdrawal of unlocked APT tokens.
+    public entry fun admin_proceed_withdrawal(sender: &signer,  validator_address: address) acquires VaultManager {
+        assert!( signer::address_of(sender) == @legato_addr , ERR_UNAUTHORIZED);
+
+        let config = borrow_global_mut<VaultManager>(@legato_addr);
+        let config_object_signer = object::generate_signer_for_extending(&config.extend_ref);
+        
+        // Get the total number of requesters.
+        let total_requester = smart_vector::length( &config.requesters );
+
+        // Proceed with withdrawal if there are unlocked tokens.
+        if ( config.unlocked_amount > 0) {
+
+            // Withdraw the unlocked APT tokens from the delegation pool.
+            let pool_address = dp::get_owned_pool_address(validator_address);
+            dp::withdraw(&config_object_signer, pool_address, config.unlocked_amount);
+
+            // Retrieve the total withdrawn APT tokens.
+            let total_apt_withdrawn = coin::balance<AptosCoin>(  signer::address_of(&config_object_signer)  );
+
+            let total_requester = smart_vector::length( &config.requesters );
+            let requester_count = 0;
+
+            // Loop through each requester and process their withdrawal.
+            while ( requester_count < total_requester) {
+                let requester_address = *smart_vector::borrow( &config.requesters, requester_count );
+                let withdraw_amount = table::remove( &mut config.pending_withdrawal, requester_address);
+
+                if (withdraw_amount > 0) {
+                    // Ensure withdrawal amount does not exceed the available balance.
+                    if (withdraw_amount > total_apt_withdrawn) {
+                        withdraw_amount = total_apt_withdrawn;
+                    };
+                   let apt_coin = coin::withdraw<AptosCoin>(&config_object_signer, withdraw_amount);
+                   coin::deposit(requester_address, apt_coin);
+                };
+
+                requester_count = requester_count+1;
+            };
+
+             // Reset the unlocked amount after processing withdrawals.
+            config.unlocked_amount = 0;
+        };
+
+    }
+ 
     // ======== Internal Functions =========
 
-    /// Returns the signer of the global config object
-    fun global_config_signer(): signer acquires Config {
-        let global_config = borrow_global<Config>(@legato_addr);
-        object::generate_signer_for_extending(&global_config.extend_ref)
-    }
+    // /// Returns the signer of the global config object
+    // fun global_config_signer(): signer acquires Config {
+    //     let global_config = borrow_global<Config>(@legato_addr);
+    //     object::generate_signer_for_extending(&global_config.extend_ref)
+    // }
 
     fun vault_exist<P>(addr: address): bool {
-        exists<PoolReserve<P>>(addr)
+        exists<VaultReserve<P>>(addr)
     }
 
-    fun calculate_pt_debt(vault_apy: u64, from_timestamp: u64, to_timestamp: u64, amount: u64) : u64 {
-        let for_epoch = epoch::to_epoch(to_timestamp)-epoch::to_epoch(from_timestamp);
-        let (for_epoch, vault_apy, amount) = ((for_epoch as u128), (vault_apy as u128), (amount as u128));
-        let result = (for_epoch*vault_apy*amount) / (36500000000);
-        (result as u64)
-    }
+    fun assert_maturity_time<P>(addr: address, maturity_time: u64) acquires VaultManager {
 
-    inline fun is_whitelisted(validator_address: address): bool {
-        let whitelist = &borrow_global<Config>(@legato_addr).whitelist;
-        smart_vector::contains(whitelist, &validator_address)
+        let global_config = borrow_global_mut<VaultManager>(addr);
+        if ( smart_vector::length( &global_config.vault_list ) > 0) { 
+            let recent_vault_name = *smart_vector::borrow( &global_config.vault_list, smart_vector::length( &global_config.vault_list )-1 );
+            let recent_vault_config = table::borrow_mut( &mut global_config.vault_config, recent_vault_name );
+            assert!(  maturity_time > recent_vault_config.maturity_time, ERR_INVALID_MATURITY  );
+        };
+
     }
+ 
 
     #[test_only]
-    /// So we can call this from `veiled_coin_tests.move`.
     public fun init_module_for_testing(deployer: &signer) {
         init_module(deployer)
     }

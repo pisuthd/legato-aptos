@@ -1,7 +1,6 @@
+ 
 #[test_only]
 module legato_addr::vault_tests {
-
-    // use std::debug::print;
 
     use std::features;
     use std::signer;
@@ -19,43 +18,37 @@ module legato_addr::vault_tests {
 
     use legato_addr::epoch;
     use legato_addr::vault;
-    use legato_addr::vault_maturity_dates::{APR_2024};
-
-     #[test_only]
-    const EPOCH_DURATION: u64 = 60;
+    use legato_addr::vault_token_name::{MAR_2024, JUN_2024};
+    
+    #[test_only]
+    const ONE_APT: u64 = 100000000; // 1x10**8
 
     #[test_only]
     const LOCKUP_CYCLE_SECONDS: u64 = 3600;
 
     #[test_only]
-    const MODULE_EVENT: u64 = 26;
-
-    #[test_only]
     const DELEGATION_POOLS: u64 = 11;
 
     #[test_only]
-    const ONE_APT: u64 = 100000000; // 1x10**8
+    const MODULE_EVENT: u64 = 26;
 
-    #[test_only]
-    const VALIDATOR_STATUS_PENDING_ACTIVE: u64 = 1;
-    const VALIDATOR_STATUS_ACTIVE: u64 = 2;
-    const VALIDATOR_STATUS_PENDING_INACTIVE: u64 = 3;
-    const VALIDATOR_STATUS_INACTIVE: u64 = 4;
-
-    #[test(deployer = @legato_addr,aptos_framework = @aptos_framework, validator = @0xdead, user_1 = @0xbeef, user_2 = @0xfeed)]
-    fun test_e2e(
+    #[test(deployer = @legato_addr,aptos_framework = @aptos_framework, validator_1 = @0xdead, validator_2 = @0x1111, user_1 = @0xbeef, user_2 = @0xfeed)]
+    fun test_mint_redeem(
         deployer: &signer,
         aptos_framework: &signer,
-        validator: &signer, 
+        validator_1: &signer, 
+        validator_2: &signer,
         user_1: &signer,
         user_2: &signer
     ) {
         initialize_for_test(aptos_framework);
-        let (_sk, pk, pop) = generate_identity();
-        initialize_test_validator(&pk, &pop, validator, 100 * ONE_APT, true, true);
+        let (_sk_1, pk_1, pop_1) = generate_identity();
+        initialize_test_validator(&pk_1, &pop_1, validator_1, 1000 * ONE_APT, true, false);
+        let (_sk_2, pk_2, pop_2) = generate_identity();
+        initialize_test_validator(&pk_2, &pop_2, validator_2, 2000 * ONE_APT, true, true);
 
-        // setup timelock vaults
-        setup_vaults(deployer, signer::address_of(validator));
+        // Setup Legato vaults
+        setup_vaults(deployer, signer::address_of(validator_1), signer::address_of(validator_2));
 
         // mint APT for user_1, user_2
         account::create_account_for_test(signer::address_of(user_1));
@@ -68,58 +61,71 @@ module legato_addr::vault_tests {
 
         assert!(coin::balance<AptosCoin>(signer::address_of(user_1)) == 100 * ONE_APT, 0);
         assert!(coin::balance<AptosCoin>(signer::address_of(user_2)) == 200 * ONE_APT, 1);
+    
+        // Stake PT tokens.
+        vault::mint<MAR_2024>( user_1, 100 * ONE_APT);
+        vault::mint<MAR_2024>( user_2, 200 * ONE_APT);
 
-        // stake for PT 
-        vault::mint<APR_2024>( user_1, signer::address_of(validator), 100 * ONE_APT);
-        vault::mint<APR_2024>( user_2, signer::address_of(validator), 200 * ONE_APT);
+        // Check PT token balances.
+        let pt_amount_1 = vault::get_pt_balance<MAR_2024>(signer::address_of(user_1));
+        let pt_amount_2 = vault::get_pt_balance<MAR_2024>(signer::address_of(user_2));
+        assert!( pt_amount_1 == 10137836771, 2);
+        assert!( pt_amount_2 == 20275673543, 3);
 
-        // having ~100.41 PT today
-        let pt_amount = vault::get_pt_balance<APR_2024>(signer::address_of(user_1));
-        assert!( pt_amount == 10041095890, 2);
-
-
-        // forwards 30 epoch
+        // Fast forward 100 epochs.
         let i:u64=1;  
-        while(i <= 30) 
+        while(i <= 100) 
         {
             timestamp::fast_forward_seconds(epoch::duration());
             end_epoch();
             i=i+1;  //incrementing the counter
         };
 
-        // check staked amount
-        let pool_address = dp::get_owned_pool_address(signer::address_of(validator) );
+        // Check the staked amount.
+        let pool_address = dp::get_owned_pool_address(signer::address_of(validator_1) );
         let (pool_staked_amount,_,_) = dp::get_stake(pool_address , vault::get_config_object_address() );
+
+        assert!( pool_staked_amount == 33120350570, 4); 
+
+        // Request redemption of PT tokens.
+        vault::request_redeem<MAR_2024>( user_1, 10137836771 );
+
+        // Perform admin tasks
+        vault::admin_proceed_unstake(deployer, signer::address_of(validator_1)  );
         
-        assert!( pool_staked_amount == 40035116288, 3);
-
-        // perform admin process
-        vault::unlock<APR_2024>( deployer, signer::address_of(validator));
-
         timestamp::fast_forward_seconds(epoch::duration());
         end_epoch();
 
-        // redeem 
-        vault::redeem<APR_2024>( user_1, signer::address_of(validator), pt_amount);
+        vault::admin_proceed_withdrawal( deployer , signer::address_of(validator_1));
 
-        // verify that the user has staked 100 APT and can now receive 100.41 APT after 30 epochs
-        let apt_amount = coin::balance<AptosCoin>(signer::address_of(user_1));
-        assert!( apt_amount == 10041095790, 4);
-
+        // verify that the user has staked 100 APT and can now receive 101.37 APT after 100 epochs
+        let apt_amount = coin::balance<AptosCoin>(signer::address_of(user_1)); 
+        assert!( apt_amount == 10137836770, 5);
     }
 
     #[test_only]
-    public fun setup_vaults(sender: &signer, validator_address: address) {
+    public fun setup_vaults(sender: &signer, validator_1: address, validator_2: address) {
 
         vault::init_module_for_testing(sender);
 
-        // matures in 30 epoch
-        let maturity_date = timestamp::now_seconds()+(30*epoch::duration());
+        // Update the batch amount to 200 APT.
+        vault::update_batch_amount(sender, 200 * ONE_APT );
 
-        // setup APR_2024 vault /w 5% APY
-        vault::new_vault<APR_2024>(sender, 5000000, maturity_date);
+        // Add the validators to the whitelist.
+        vault::add_whitelist(sender, validator_1);
+        vault::add_whitelist(sender, validator_2);
 
-        vault::add_whitelist_validator(sender, validator_address);
+        // Vault #1 matures in 100 epochs.
+        let maturity_1 = timestamp::now_seconds()+(100*epoch::duration());
+
+        // Create Vault #1 with an APY of 5%.
+        vault::new_vault<MAR_2024>(sender, maturity_1, 5, 100);
+
+        // Vault #2 matures in 200 epochs.
+        let maturity_2 = timestamp::now_seconds()+(200*epoch::duration());
+
+        // Create Vault #2 with an APY of 4%.
+        vault::new_vault<JUN_2024>(sender, maturity_2, 4, 100);
     }
 
     #[test_only]
@@ -131,7 +137,7 @@ module legato_addr::vault_tests {
             LOCKUP_CYCLE_SECONDS,
             true,
             1,
-            100,
+            1000,
             1000000
         );
     }
@@ -142,6 +148,7 @@ module legato_addr::vault_tests {
         reconfiguration::reconfigure_for_test_custom();
     }
 
+    // Convenient function for setting up all required stake initializations.
     #[test_only]
     public fun initialize_for_test_custom(
         aptos_framework: &signer,
