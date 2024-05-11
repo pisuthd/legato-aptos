@@ -26,12 +26,12 @@ module legato_addr::amm {
     
     // Default swap fee of 0.5% in fixed-point
     const DEFAULT_FEE: u128 = 92233720368547758; 
-    /// Max u64 value.
+    // Max u64 value.
     const U64_MAX: u64 = 18446744073709551615;
-    /// The max value that can be held in one of the Balances of
-    /// a Pool. U64 MAX / WEIGHT_SCALE
+    // The max value that can be held in one of the Balances of
+    // a Pool. U64 MAX / WEIGHT_SCALE
     const MAX_POOL_VALUE: u64 = { 18446744073709551615 / 10000 };
-    /// Minimal liquidity.
+    // Minimal liquidity.
     const MINIMAL_LIQUIDITY: u64 = 1000; 
 
     const WEIGHT_SCALE: u64 = 10000;
@@ -79,7 +79,7 @@ module legato_addr::amm {
     }
 
     // Represents the global state of the AMM. 
-    struct AMMConfig has key { 
+    struct AMMManager has key { 
         pool_list: SmartVector<String>, // all pools in the system
         whitelist: SmartVector<address>, // who can setup a new pool
         extend_ref: ExtendRef,
@@ -95,7 +95,7 @@ module legato_addr::amm {
         let whitelist = smart_vector::new();
         smart_vector::push_back(&mut whitelist, signer::address_of(sender));
 
-        move_to(sender, AMMConfig { 
+        move_to(sender, AMMManager { 
             whitelist , 
             pool_list: smart_vector::new(), 
             extend_ref,
@@ -111,13 +111,13 @@ module legato_addr::amm {
         sender: &signer,
         weight_x: u64,
         weight_y: u64
-    ) acquires AMMConfig {
+    ) acquires AMMManager {
         let is_order = is_order<X, Y>();
         assert!(is_order, ERR_MUST_BE_ORDER);
         assert!(coin::is_coin_initialized<X>(), ERR_NOT_COIN);
         assert!(coin::is_coin_initialized<Y>(), ERR_NOT_COIN);
 
-        let config = borrow_global_mut<AMMConfig>(@legato_addr);
+        let config = borrow_global_mut<AMMManager>(@legato_addr);
         // Ensure that the call is on the whitelist
         assert!( smart_vector::contains(&config.whitelist, &(signer::address_of(sender))) , ERR_UNAUTHORIZED);
         // Ensure that the normalized weights sum up to 100%
@@ -164,14 +164,14 @@ module legato_addr::amm {
         coin_x_min: u64,
         coin_y_amount: u64,
         coin_y_min: u64
-    ) acquires AMMConfig, Pool {
+    ) acquires AMMManager, Pool {
         let is_order = is_order<X, Y>();
         assert!(is_order, ERR_MUST_BE_ORDER);
 
         assert!(coin::is_coin_initialized<X>(), ERR_NOT_COIN);
         assert!(coin::is_coin_initialized<Y>(), ERR_NOT_COIN);
 
-        let config = borrow_global_mut<AMMConfig>(@legato_addr);
+        let config = borrow_global_mut<AMMManager>(@legato_addr);
         let (_, lp_symbol) = generate_lp_name_and_symbol<X, Y>();
         assert!( smart_vector::contains(&config.pool_list, &lp_symbol) , ERR_POOL_EXISTS);
 
@@ -212,13 +212,13 @@ module legato_addr::amm {
     public entry fun remove_liquidity<X, Y>( 
         lp_provider: &signer, 
         lp_amount: u64
-    ) acquires AMMConfig, Pool {
+    ) acquires AMMManager, Pool {
         let is_order = is_order<X, Y>();
         assert!(is_order, ERR_MUST_BE_ORDER);
 
         assert!(coin::is_coin_initialized<LP<X,Y>>(), ERR_NOT_COIN);
 
-        let config = borrow_global_mut<AMMConfig>(@legato_addr);
+        let config = borrow_global_mut<AMMManager>(@legato_addr);
         let (_, lp_symbol) = generate_lp_name_and_symbol<X, Y>();
         assert!( smart_vector::contains(&config.pool_list, &lp_symbol) , ERR_POOL_EXISTS);
         
@@ -239,8 +239,13 @@ module legato_addr::amm {
             pool.weight_y
         ); 
 
-        // TODO: complete this
+        let coin_x = coin::extract(&mut pool.coin_x, coin_x_out);
+        coin::deposit(signer::address_of(lp_provider), coin_x);
 
+        let coin_y = coin::extract(&mut pool.coin_y, coin_y_out);
+        coin::deposit(signer::address_of(lp_provider), coin_y);
+
+        // TODO: emit event
 
     }
 
@@ -250,7 +255,7 @@ module legato_addr::amm {
         sender: &signer, 
         coin_in: u64,
         coin_out_min: u64
-    ) acquires Pool, AMMConfig {
+    ) acquires Pool, AMMManager {
         let is_order = is_order<X, Y>();
         assert!(coin::is_coin_initialized<X>(), ERR_NOT_COIN);
         assert!(coin::is_coin_initialized<Y>(), ERR_NOT_COIN);
@@ -299,10 +304,10 @@ module legato_addr::amm {
     public fun calc_optimal_coin_values<X, Y>(
         x_desired: u64,
         y_desired: u64
-    ): (u64, u64) acquires Pool, AMMConfig   {
+    ): (u64, u64) acquires Pool, AMMManager   {
         let (reserves_x, reserves_y) = get_reserves_size<X, Y>();
 
-        let config = borrow_global_mut<AMMConfig>(@legato_addr);
+        let config = borrow_global_mut<AMMManager>(@legato_addr);
         let config_object_signer = object::generate_signer_for_extending(&config.extend_ref);
         let pool_address = signer::address_of(&config_object_signer);
         let pool = borrow_global_mut<Pool<X, Y>>(pool_address);
@@ -310,7 +315,6 @@ module legato_addr::amm {
         if (reserves_x == 0 && reserves_y == 0) {
             return (x_desired, y_desired)
         } else {
-            
             let y_returned = weighted_math::compute_optimal_value(x_desired, reserves_x, reserves_y, pool.weight_y);
 
             if (y_returned <= y_desired) {
@@ -323,8 +327,8 @@ module legato_addr::amm {
         }
     }
 
-    public fun get_reserves_size<X, Y>(): (u64, u64) acquires Pool, AMMConfig {
-        let config = borrow_global_mut<AMMConfig>(@legato_addr);
+    public fun get_reserves_size<X, Y>(): (u64, u64) acquires Pool, AMMManager {
+        let config = borrow_global_mut<AMMManager>(@legato_addr);
         let config_object_signer = object::generate_signer_for_extending(&config.extend_ref);
         let pool_address = signer::address_of(&config_object_signer);
 
@@ -344,9 +348,9 @@ module legato_addr::amm {
         coin_out_min_value: u64,
         reserve_in: u64,
         reserve_out: u64,
-    ) acquires Pool, AMMConfig {
+    ) acquires Pool, AMMManager {
 
-        let config = borrow_global_mut<AMMConfig>(@legato_addr);
+        let config = borrow_global_mut<AMMManager>(@legato_addr);
         let (_, lp_symbol) = generate_lp_name_and_symbol<X, Y>();
         assert!( smart_vector::contains(&config.pool_list, &lp_symbol) , ERR_POOL_EXISTS);
         
@@ -388,9 +392,9 @@ module legato_addr::amm {
         coin_out_min_value: u64,
         reserve_in: u64,
         reserve_out: u64,
-    ) acquires Pool, AMMConfig {
+    ) acquires Pool, AMMManager {
 
-        let config = borrow_global_mut<AMMConfig>(@legato_addr);
+        let config = borrow_global_mut<AMMManager>(@legato_addr);
         let (_, lp_symbol) = generate_lp_name_and_symbol<X, Y>();
         assert!( smart_vector::contains(&config.pool_list, &lp_symbol) , ERR_POOL_EXISTS);
         
@@ -428,8 +432,8 @@ module legato_addr::amm {
     }
 
     #[view]
-    public fun get_config_object_address() : address  acquires AMMConfig  {
-        let config = borrow_global_mut<AMMConfig>(@legato_addr);
+    public fun get_config_object_address() : address  acquires AMMManager  {
+        let config = borrow_global_mut<AMMManager>(@legato_addr);
         let config_object_signer = object::generate_signer_for_extending(&config.extend_ref);
         signer::address_of(&config_object_signer)
     }
@@ -437,36 +441,36 @@ module legato_addr::amm {
     // ======== Only Governance =========
 
     // add whitelist
-    public entry fun add_whitelist(sender: &signer, whitelist_address: address) acquires AMMConfig {
+    public entry fun add_whitelist(sender: &signer, whitelist_address: address) acquires AMMManager {
         assert!( signer::address_of(sender) == @legato_addr , ERR_UNAUTHORIZED);
-        let config = borrow_global_mut<AMMConfig>(@legato_addr);
+        let config = borrow_global_mut<AMMManager>(@legato_addr);
         assert!( !smart_vector::contains(&config.whitelist, &whitelist_address) , ERR_INVALID_ADDRESS);
         smart_vector::push_back(&mut config.whitelist, whitelist_address);
     }
 
     // remove whitelist
-    public entry fun remove_whitelist(sender: &signer, whitelist_address: address) acquires AMMConfig {
+    public entry fun remove_whitelist(sender: &signer, whitelist_address: address) acquires AMMManager {
         assert!( signer::address_of(sender) == @legato_addr , ERR_UNAUTHORIZED);
-        let config = borrow_global_mut<AMMConfig>(@legato_addr);
+        let config = borrow_global_mut<AMMManager>(@legato_addr);
         let (found, idx) = smart_vector::index_of<address>(&config.whitelist, &whitelist_address);
         assert!(  found , ERR_INVALID_ADDRESS);
         smart_vector::swap_remove<address>(&mut config.whitelist, idx );
     }
 
     // update treasury address
-    public entry fun update_treasury_address(sender: &signer, new_address: address) acquires AMMConfig {
+    public entry fun update_treasury_address(sender: &signer, new_address: address) acquires AMMManager {
         assert!( signer::address_of(sender) == @legato_addr , ERR_UNAUTHORIZED);
-        let config = borrow_global_mut<AMMConfig>(@legato_addr);
+        let config = borrow_global_mut<AMMManager>(@legato_addr);
         config.treasury_address = new_address;
     }
 
     // update fee 
-    public entry fun update_fee<X,Y>(sender: &signer, fee_numerator: u128, fee_denominator: u128) acquires AMMConfig, Pool {
+    public entry fun update_fee<X,Y>(sender: &signer, fee_numerator: u128, fee_denominator: u128) acquires AMMManager, Pool {
         let is_order = is_order<X, Y>();
         assert!(is_order, ERR_MUST_BE_ORDER);
         assert!( signer::address_of(sender) == @legato_addr , ERR_UNAUTHORIZED);
 
-        let config = borrow_global_mut<AMMConfig>(@legato_addr); 
+        let config = borrow_global_mut<AMMManager>(@legato_addr); 
 
         let (_, lp_symbol) = generate_lp_name_and_symbol<X, Y>();
         assert!( smart_vector::contains(&config.pool_list, &lp_symbol) , ERR_POOL_EXISTS);
@@ -479,13 +483,13 @@ module legato_addr::amm {
     }
 
     // update weights
-    public entry fun update_weights<X,Y>(sender: &signer, weight_x: u64, weight_y: u64) acquires AMMConfig, Pool {
+    public entry fun update_weights<X,Y>(sender: &signer, weight_x: u64, weight_y: u64) acquires AMMManager, Pool {
         let is_order = is_order<X, Y>();
         assert!(is_order, ERR_MUST_BE_ORDER);
         assert!( signer::address_of(sender) == @legato_addr , ERR_UNAUTHORIZED);
         assert!( weight_x+weight_y == 10000, ERR_WEIGHTS_SUM); 
 
-        let config = borrow_global_mut<AMMConfig>(@legato_addr); 
+        let config = borrow_global_mut<AMMManager>(@legato_addr); 
 
         let (_, lp_symbol) = generate_lp_name_and_symbol<X, Y>();
         assert!( smart_vector::contains(&config.pool_list, &lp_symbol) , ERR_POOL_EXISTS);
@@ -539,8 +543,8 @@ module legato_addr::amm {
         optimal_y: u64,
         coin_x_reserve: u64,
         coin_y_reserve: u64
-    ): Coin<LP<X, Y>>  acquires Pool, AMMConfig {
-        let config = borrow_global_mut<AMMConfig>(@legato_addr);
+    ): Coin<LP<X, Y>>  acquires Pool, AMMManager {
+        let config = borrow_global_mut<AMMManager>(@legato_addr);
         let config_object_signer = object::generate_signer_for_extending(&config.extend_ref);
         let pool_address = signer::address_of(&config_object_signer);
 

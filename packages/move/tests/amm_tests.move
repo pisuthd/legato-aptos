@@ -11,7 +11,7 @@ module legato_addr::amm_tests {
     
     use legato_addr::amm::{Self, LP};
 
-    struct BTC {}
+    struct XBTC {}
 
     struct USDT {}
 
@@ -31,6 +31,8 @@ module legato_addr::amm_tests {
 
         register_pools(deployer, lp_provider, user);
  
+        add_remove_liquidity(deployer,  lp_provider );
+
     }
 
     #[test(deployer = @legato_addr, lp_provider = @0xdead, user = @0xbeef )]
@@ -38,11 +40,11 @@ module legato_addr::amm_tests {
 
         register_pools(deployer, lp_provider, user);
         
-        amm::swap<USDT, BTC>(user, 20_000_000, 1); // 20 USDT
+        amm::swap<USDT, XBTC>(user, 20_000_000, 1); // 20 USDT
 
         let user_address = signer::address_of(user);
         
-        assert!(coin::balance<BTC>(user_address) == 39754, ERR_UNKNOWN); // 0.00039754 BTC at ~50,536 BTC/USDT
+        assert!(coin::balance<XBTC>(user_address) == 39754, ERR_UNKNOWN); // 0.00039754 BTC at ~50,536 BTC/USDT
     }
 
     #[test_only]
@@ -71,29 +73,67 @@ module legato_addr::amm_tests {
         assert!(coin::balance<USDT>(deployer_address) == USDT_AMOUNT, ERR_UNKNOWN);
 
         // BTC
-        coin::register<BTC>(deployer);
-        coin::register<BTC>(lp_provider);
-        coin::register<BTC>(user);
-        let xbtc_mint_cap = register_coin<BTC>(deployer, b"BTC", b"BTC", 8);
-        coin::deposit(deployer_address, coin::mint<BTC>(BTC_AMOUNT, &xbtc_mint_cap));
-        coin::deposit(lp_provider_address, coin::mint<BTC>(BTC_AMOUNT, &xbtc_mint_cap));
+        coin::register<XBTC>(deployer);
+        coin::register<XBTC>(lp_provider);
+        coin::register<XBTC>(user);
+        let xbtc_mint_cap = register_coin<XBTC>(deployer, b"BTC", b"BTC", 8);
+        coin::deposit(deployer_address, coin::mint<XBTC>(BTC_AMOUNT, &xbtc_mint_cap));
+        coin::deposit(lp_provider_address, coin::mint<XBTC>(BTC_AMOUNT, &xbtc_mint_cap));
         coin::destroy_mint_cap(xbtc_mint_cap);
-        assert!(coin::balance<BTC>(deployer_address) == BTC_AMOUNT, 2);
+        assert!(coin::balance<XBTC>(deployer_address) == BTC_AMOUNT, 2);
 
-        amm::register_pool<BTC, USDT>(deployer, 9000, 1000);
+        amm::register_pool<USDT, XBTC>(deployer, 1000, 9000);
 
-        amm::add_liquidity<BTC, USDT>(
+        amm::add_liquidity<USDT, XBTC>(
             deployer,
-            BTC_AMOUNT,
-            1,
             USDT_AMOUNT,
+            1,
+            BTC_AMOUNT,
             1
         );
 
-        assert!(coin::balance<BTC>(deployer_address) == 0, ERR_UNKNOWN);
+        assert!(coin::balance<XBTC>(deployer_address) == 0, ERR_UNKNOWN);
         assert!(coin::balance<USDT>(deployer_address) == 0, ERR_UNKNOWN);
         
-        assert!(coin::balance<LP<BTC, USDT>>(deployer_address) == 268_994_649, 3);
+        assert!(coin::balance<LP<USDT, XBTC>>(deployer_address) == 268_994_649, 3);
+
+    }
+
+    #[test_only]
+    public fun add_remove_liquidity(deployer: &signer, lp_provider: &signer) {
+        
+        let lp_provider_address = signer::address_of(lp_provider);
+
+        amm::add_liquidity<USDT, XBTC>(
+            lp_provider,
+            USDT_AMOUNT/20, // 500 USDT
+            1,
+            BTC_AMOUNT/20, // 0.09 XBTC
+            1
+        );
+
+        let lp_amount = coin::balance<LP<USDT, XBTC>>(lp_provider_address);
+
+        assert!(lp_amount == 13_390_722, ERR_UNKNOWN);
+
+        // Transfer tokens out from the LP provider
+        let usdt_amount = coin::balance<USDT>(lp_provider_address); 
+        coin::transfer<USDT>( lp_provider, signer::address_of(deployer),usdt_amount);
+
+        let xbtc_amount = coin::balance<XBTC>(lp_provider_address); 
+        coin::transfer<XBTC>( lp_provider, signer::address_of(deployer),xbtc_amount);
+
+        amm::remove_liquidity<USDT, XBTC>(
+            lp_provider,
+            lp_amount
+        );
+
+        usdt_amount = coin::balance<USDT>(lp_provider_address); 
+        assert!( usdt_amount == 487416859, ERR_UNKNOWN); // 487 USDT
+
+        xbtc_amount = coin::balance<XBTC>(lp_provider_address); 
+        assert!(xbtc_amount == 8940828, ERR_UNKNOWN); // 0.089 XBTC
+
     }
 
     #[test_only]
