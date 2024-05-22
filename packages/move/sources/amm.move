@@ -315,14 +315,14 @@ module legato_addr::amm {
         if (reserves_x == 0 && reserves_y == 0) {
             return (x_desired, y_desired)
         } else {
-            let y_returned = weighted_math::compute_optimal_value(x_desired, reserves_x, reserves_y, pool.weight_y);
+            let y_needed = weighted_math::compute_optimal_value(x_desired, reserves_y, pool.weight_y, reserves_x, pool.weight_x );
 
-            if (y_returned <= y_desired) {
-                return (x_desired, y_returned)
+            if (y_needed <= y_desired) {
+                return (x_desired, y_needed)
             } else {
-                let x_returned =  weighted_math::compute_optimal_value(y_desired, reserves_y, reserves_x, pool.weight_x);
-                assert!(x_returned <= x_desired, ERR_OVERLIMIT_X);
-                return (x_returned, y_desired)
+                let x_needed =  weighted_math::compute_optimal_value(y_desired, reserves_x, pool.weight_x, reserves_y, pool.weight_y);
+                assert!(x_needed <= x_desired, ERR_OVERLIMIT_X);
+                return (x_needed, y_desired)
             }
         }
     }
@@ -566,11 +566,8 @@ module legato_addr::amm {
             coin::merge(&mut pool.min_liquidity, coin::mint<LP<X, Y>>(MINIMAL_LIQUIDITY, &pool.lp_mint) );
 
             initial_liq - MINIMAL_LIQUIDITY
-        } else {
-
-            let (x_liq, y_liq) = weighted_math::compute_derive_lp( optimal_x, optimal_y, pool.weight_x, pool.weight_y, coin_x_reserve, coin_y_reserve, (lp_coins_total as u64) );
-    
-            (x_liq + y_liq)    
+        } else {   
+            weighted_math::compute_derive_lp( optimal_x, optimal_y, pool.weight_x, pool.weight_y, coin_x_reserve, coin_y_reserve, (lp_coins_total as u64)  )
         };
 
         // Merges provided coins into pool
