@@ -41,21 +41,15 @@ module legato_addr::vault_tests {
         user_1: &signer,
         user_2: &signer
     ) {
-        initialize_for_test(aptos_framework);
-        let (_sk_1, pk_1, pop_1) = generate_identity();
-        initialize_test_validator(&pk_1, &pop_1, validator_1, 1000 * ONE_APT, true, false);
-        let (_sk_2, pk_2, pop_2) = generate_identity();
-        initialize_test_validator(&pk_2, &pop_2, validator_2, 2000 * ONE_APT, true, true);
-
+        initialize_for_test(aptos_framework, validator_1, validator_2);
+        
         // Setup Legato vaults
         setup_vaults(deployer, signer::address_of(validator_1), signer::address_of(validator_2));
 
-        // mint APT for user_1, user_2
-        account::create_account_for_test(signer::address_of(user_1));
-        account::create_account_for_test(signer::address_of(user_2)); 
-        account::create_account_for_test(signer::address_of(deployer)); 
-        account::create_account_for_test( vault::get_config_object_address() ); 
+        // Prepare test accounts
+        create_test_accounts( deployer, user_1, user_2);
 
+        // Mint APT tokens
         stake::mint(user_1, 100 * ONE_APT);
         stake::mint(user_2, 200 * ONE_APT); 
 
@@ -69,8 +63,8 @@ module legato_addr::vault_tests {
         // Check PT token balances.
         let pt_amount_1 = vault::get_pt_balance<MAR_2024>(signer::address_of(user_1));
         let pt_amount_2 = vault::get_pt_balance<MAR_2024>(signer::address_of(user_2));
-        assert!( pt_amount_1 == 10137836771, 2);
-        assert!( pt_amount_2 == 20275673543, 3);
+        assert!( pt_amount_1 == 101_37836771, 2); // 101.378 PT
+        assert!( pt_amount_2 == 202_75673543, 3); // 202.756 PT
 
         // Fast forward 100 epochs.
         let i:u64=1;  
@@ -78,29 +72,83 @@ module legato_addr::vault_tests {
         {
             timestamp::fast_forward_seconds(epoch::duration());
             end_epoch();
-            i=i+1;  //incrementing the counter
+            i=i+1; // Incrementing the counter
         };
 
         // Check the staked amount.
         let pool_address = dp::get_owned_pool_address(signer::address_of(validator_1) );
         let (pool_staked_amount,_,_) = dp::get_stake(pool_address , vault::get_config_object_address() );
 
-        assert!( pool_staked_amount == 33120350570, 4); 
+        assert!( pool_staked_amount == 331_20350570, 4); // 331.203 APT 
 
         // Request redemption of PT tokens.
-        vault::request_redeem<MAR_2024>( user_1, 10137836771 );
+        vault::request_redeem<MAR_2024>( user_1, 101_37836771 ); 
 
-        // Perform admin tasks
+        // Perform admin tasks.
         vault::admin_proceed_unstake(deployer, signer::address_of(validator_1)  );
         
+        // Fast forward one epoch.
         timestamp::fast_forward_seconds(epoch::duration());
         end_epoch();
 
         vault::admin_proceed_withdrawal( deployer , signer::address_of(validator_1));
 
-        // verify that the user has staked 100 APT and can now receive 101.37 APT after 100 epochs
+        // Verify has the correct amount of APT tokens after redemption.
         let apt_amount = coin::balance<AptosCoin>(signer::address_of(user_1)); 
-        assert!( apt_amount == 10137836770, 5);
+        assert!( apt_amount == 101_37836770, 5);
+    }
+
+    #[test(deployer = @legato_addr,aptos_framework = @aptos_framework, validator_1 = @0xdead, validator_2 = @0x1111, user_1 = @0xbeef, user_2 = @0xfeed)]
+    fun test_mint_exit(
+        deployer: &signer,
+        aptos_framework: &signer,
+        validator_1: &signer, 
+        validator_2: &signer,
+        user_1: &signer,
+        user_2: &signer
+    ) {
+        initialize_for_test(aptos_framework, validator_1, validator_2); 
+
+        // Setup Legato vaults
+        setup_vaults(deployer, signer::address_of(validator_1), signer::address_of(validator_2));
+
+        // Prepare test accounts
+        create_test_accounts( deployer, user_1, user_2);
+
+        // Stake PT tokens.
+        stake::mint(user_1, 100 * ONE_APT);
+        stake::mint(user_2, 200 * ONE_APT); 
+
+        vault::mint<MAR_2024>( user_1, 100 * ONE_APT);
+        vault::mint<MAR_2024>( user_2, 200 * ONE_APT);
+
+        // Fast forward 10 epochs.
+        let i:u64=1;  
+        while(i <= 10) 
+        {
+            timestamp::fast_forward_seconds(epoch::duration());
+            end_epoch();
+            i=i+1; // Incrementing the counter
+        };
+
+        let amount_before = vault::get_pt_balance<MAR_2024>(signer::address_of(user_1));
+        assert!( amount_before == 101_37836771, 0); // 101.378 PT
+        
+        // Request exit
+        vault::request_exit<MAR_2024>( user_1, amount_before ); 
+
+        // Perform admin tasks.
+        vault::admin_proceed_unstake(deployer, signer::address_of(validator_1)  );
+        
+        // Fast forward one epoch.
+        timestamp::fast_forward_seconds(epoch::duration());
+        end_epoch();
+
+        vault::admin_proceed_withdrawal( deployer , signer::address_of(validator_1));
+
+        let apt_amount = coin::balance<AptosCoin>(signer::address_of(user_1)); 
+        assert!( apt_amount == 100_13708438, 0); // 100.137 PT
+        
     }
 
     #[test_only]
@@ -129,7 +177,23 @@ module legato_addr::vault_tests {
     }
 
     #[test_only]
-    public fun initialize_for_test(aptos_framework: &signer) {
+    public fun create_test_accounts(
+        deployer: &signer,
+        user_1: &signer,
+        user_2: &signer
+    ) {
+        account::create_account_for_test(signer::address_of(user_1));
+        account::create_account_for_test(signer::address_of(user_2)); 
+        account::create_account_for_test(signer::address_of(deployer)); 
+        account::create_account_for_test( vault::get_config_object_address() ); 
+    }
+
+    #[test_only]
+    public fun initialize_for_test(
+        aptos_framework: &signer,
+        validator_1: &signer, 
+        validator_2: &signer
+    ) {
         initialize_for_test_custom(
             aptos_framework,
             100 * ONE_APT,
@@ -140,6 +204,11 @@ module legato_addr::vault_tests {
             1000,
             1000000
         );
+        let (_sk_1, pk_1, pop_1) = generate_identity();
+
+        initialize_test_validator(&pk_1, &pop_1, validator_1, 1000 * ONE_APT, true, false);
+        let (_sk_2, pk_2, pop_2) = generate_identity();
+        initialize_test_validator(&pk_2, &pop_2, validator_2, 2000 * ONE_APT, true, true);
     }
 
     #[test_only]
@@ -172,7 +241,7 @@ module legato_addr::vault_tests {
             voting_power_increase_limit
         );
         reconfiguration::initialize_for_test(aptos_framework);
-        features::change_feature_flags(aptos_framework, vector[DELEGATION_POOLS, MODULE_EVENT], vector[]);
+        // features::change_feature_flags(aptos_framework, vector[DELEGATION_POOLS, MODULE_EVENT], vector[]);
     }
 
     #[test_only]

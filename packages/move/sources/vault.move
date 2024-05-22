@@ -199,6 +199,44 @@ module legato_addr::vault {
         // emit event
     }
 
+    // request exit when the vault is not matured, the amount returned 
+    // - APT = PT / e^(rt) - exit fee%
+    public entry fun request_exit<P>(sender: &signer, amount: u64 ) acquires VaultReserve, VaultManager {
+        assert!(exists<VaultReserve<P>>(@legato_addr), ERR_INVALID_VAULT);
+
+        let type_name = type_info::type_name<P>();
+
+        let config = borrow_global_mut<VaultManager>(@legato_addr);
+        let config_object_signer = object::generate_signer_for_extending(&config.extend_ref);
+
+        let vault_config = table::borrow_mut( &mut config.vault_config, type_name );        
+        let vault_reserve = borrow_global_mut<VaultReserve<P>>(@legato_addr); 
+
+        assert!(vault_config.maturity_time > timestamp::now_seconds() , ERR_VAULT_MATURED);
+
+        // Burn PT tokens on the sender's account
+        let pt_coin = coin::withdraw<PT_TOKEN<P>>(sender, amount);
+        coin::burn(pt_coin, &vault_reserve.pt_burn);
+
+        let adjusted_amount = calculate_exit_amount(vault_config.vault_apy, timestamp::now_seconds(), vault_config.maturity_time, amount);
+
+        // Add the request to the withdrawal list
+        table::add(
+            &mut config.pending_unstake,
+            signer::address_of(sender),
+            adjusted_amount
+        );
+
+        if ( !smart_vector::contains(&config.requesters, &(signer::address_of(sender))) ) {
+            smart_vector::push_back(&mut config.requesters, signer::address_of(sender));
+        };
+
+        // Update
+        vault_reserve.pt_total_supply = vault_reserve.pt_total_supply-amount;
+
+        // emit event
+
+    }
 
     // Calculate the amount of PT debt to be sent out using the formula P = S * e^(rt)
     public fun calculate_pt_debt_amount(apy: FixedPoint64, from_timestamp: u64, to_timestamp: u64, input_amount: u64): u64 {
@@ -212,6 +250,17 @@ module legato_addr::vault {
 
         // the final PT debt amount
         ( fixed_point64::multiply_u128( (input_amount as u128), multiplier  ) as u64 )
+    }
+    
+    // // Calculate the amount when exiting using the formula S = P / e^(rt
+    public fun calculate_exit_amount(apy: FixedPoint64, from_timestamp: u64, to_timestamp: u64, output_amount: u64) : u64 {
+
+        let time = fixed_point64::create_from_rational( ((to_timestamp-from_timestamp) as u128), 31556926 );
+
+        let rt = math_fixed64::mul_div( apy, time, fixed_point64::create_from_u128(1));
+        let denominator = math_fixed64::exp(rt);
+
+        ( fixed_point64::divide_u128( (output_amount as u128), denominator  ) as u64 )
     }
 
     #[view]
@@ -406,13 +455,7 @@ module legato_addr::vault {
     }
  
     // ======== Internal Functions =========
-
-    // /// Returns the signer of the global config object
-    // fun global_config_signer(): signer acquires Config {
-    //     let global_config = borrow_global<Config>(@legato_addr);
-    //     object::generate_signer_for_extending(&global_config.extend_ref)
-    // }
-
+ 
     fun vault_exist<P>(addr: address): bool {
         exists<VaultReserve<P>>(addr)
     }
@@ -428,7 +471,6 @@ module legato_addr::vault {
 
     }
  
-
     #[test_only]
     public fun init_module_for_testing(deployer: &signer) {
         init_module(deployer)
