@@ -13,12 +13,14 @@ module legato_addr::amm {
  
     use aptos_framework::coin::{Self, Coin, MintCapability, BurnCapability}; 
     use aptos_framework::object::{Self, ExtendRef};
+    
 
     use aptos_std::smart_vector::{Self, SmartVector};
     use aptos_std::math128;
     use aptos_std::comparator::{Self, Result};
     use aptos_std::type_info; 
     use aptos_std::fixed_point64::{Self, FixedPoint64};
+    use aptos_std::table::{Self, Table};
 
     use legato_addr::weighted_math;
 
@@ -34,9 +36,7 @@ module legato_addr::amm {
     // Minimal liquidity.
     const MINIMAL_LIQUIDITY: u64 = 1000; 
 
-    const WEIGHT_SCALE: u64 = 10000;
-    // Minimum APT required to stake.
-    const MIN_APT_TO_STAKE: u64 = 100_000_000; // 1 APT
+    const WEIGHT_SCALE: u64 = 10000; 
     
     const SYMBOL_PREFIX_LENGTH: u64 = 4;
 
@@ -118,7 +118,7 @@ module legato_addr::amm {
         assert!(coin::is_coin_initialized<Y>(), ERR_NOT_COIN);
 
         let config = borrow_global_mut<AMMManager>(@legato_addr);
-        // Ensure that the call is on the whitelist
+        // Ensure that the caller is on the whitelist
         assert!( smart_vector::contains(&config.whitelist, &(signer::address_of(sender))) , ERR_UNAUTHORIZED);
         // Ensure that the normalized weights sum up to 100%
         assert!( weight_x+weight_y == 10000, ERR_WEIGHTS_SUM); 
@@ -482,25 +482,6 @@ module legato_addr::amm {
         pool.swap_fee = fixed_point64::create_from_rational( fee_numerator, fee_denominator );
     }
 
-    // update weights
-    public entry fun update_weights<X,Y>(sender: &signer, weight_x: u64, weight_y: u64) acquires AMMManager, Pool {
-        let is_order = is_order<X, Y>();
-        assert!(is_order, ERR_MUST_BE_ORDER);
-        assert!( signer::address_of(sender) == @legato_addr , ERR_UNAUTHORIZED);
-        assert!( weight_x+weight_y == 10000, ERR_WEIGHTS_SUM); 
-
-        let config = borrow_global_mut<AMMManager>(@legato_addr); 
-
-        let (_, lp_symbol) = generate_lp_name_and_symbol<X, Y>();
-        assert!( smart_vector::contains(&config.pool_list, &lp_symbol) , ERR_POOL_EXISTS);
-        
-        let config_object_signer = object::generate_signer_for_extending(&config.extend_ref);
-        let pool_address = signer::address_of(&config_object_signer); 
-
-        let pool = borrow_global_mut<Pool<X, Y>>(pool_address);
-        pool.weight_x = weight_x;
-        pool.weight_y = weight_y;
-    }
 
 
     // ======== Internal Functions =========
