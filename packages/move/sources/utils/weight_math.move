@@ -1,6 +1,8 @@
 
 
-// Module for weighted math operations
+// Module for weighted math operations, the formulas are borrowed from Balancer V2 Lite project.
+// https://github.com/icmoore/balancer-v2-lite
+
 
 module legato_addr::weighted_math {
  
@@ -19,18 +21,21 @@ module legato_addr::weighted_math {
     const ERR_INCORRECT_SWAP: u64 = 1; 
 
     // Computes the optimal value for adding liquidity
-    // - amount_out = amount_in * (reserve_out/reserve_in)^(weight_out/WEIGHT_SCALE)
     public fun compute_optimal_value(
-        amount_in: u64,
+        amount_out: u64,
         reserve_in: u64, 
+        weight_in: u64,
         reserve_out: u64,
-        weight_out: u64
+        weight_out: u64,
     ) : u64 {
         
-        let base = fixed_point64::create_from_rational( ( reserve_out as u128), (reserve_in as u128) );
-        let power = power(base, fixed_point64::create_from_rational( (weight_out as u128), (WEIGHT_SCALE as u128) ));
-
-        (fixed_point64::multiply_u128( (amount_in as u128), power ) as u64)
+        get_amount_in(
+            amount_out,
+            reserve_in,
+            weight_in,
+            reserve_out,
+            weight_out
+        )
     }
 
     // Calculate the output amount according to the pool weight
@@ -68,6 +73,40 @@ module legato_addr::weighted_math {
  
     }
 
+    // Calculate the output amount according to the pool weight 
+    // - amountIn = balanceIn * ((( balanceOut / (balanceOut - amountOut) ) ^ (wO/wI))-1)
+    public fun get_amount_in(
+        amount_out: u64,
+        reserve_in: u64,
+        weight_in: u64, 
+        reserve_out: u64,
+        weight_out: u64, 
+    ) : u64 {
+
+        let amount_out_after_scaled = (amount_out as u128);
+        let reserve_in_after_scaled = (reserve_in as u128);
+        let reserve_out_after_scaled  = (reserve_out as u128);
+
+        if (weight_in == weight_out) {
+            let denominator = reserve_out_after_scaled-amount_out_after_scaled;
+            let base = fixed_point64::create_from_rational(reserve_out_after_scaled , denominator);
+            let amount_out = fixed_point64::multiply_u128( reserve_in_after_scaled, fixed_point64::sub(base, fixed_point64::create_from_u128(1))  );
+
+            (amount_out as u64)
+        } else {
+
+            let denominator = reserve_out_after_scaled-amount_out_after_scaled;
+            let base = fixed_point64::create_from_rational(reserve_out_after_scaled , denominator);
+            let exponent = fixed_point64::create_from_rational((weight_out as u128), (weight_in as u128));
+ 
+            let power = power(base, exponent);
+            let amount_out = fixed_point64::multiply_u128( reserve_in_after_scaled, fixed_point64::sub(power, fixed_point64::create_from_u128(1))  );
+
+            (amount_out as u64)
+        }
+
+    }
+
     // Computes initial LP amount using the formula - total_share = (amount_x^weight_x) * (amount_y^weight_y)
     public fun compute_initial_lp(
         weight_x: u64,
@@ -93,12 +132,12 @@ module legato_addr::weighted_math {
         reserve_x: u64,
         reserve_y: u64,
         lp_supply: u64
-    ): (u64, u64) {
+    ): (u64) {
 
         let for_x = token_for_lp(amount_x, reserve_x, weight_x, lp_supply );
         let for_y = token_for_lp(amount_y, reserve_y, weight_y, lp_supply );
 
-        ((for_x as u64), (for_y as u64))
+        (fixed_point64::round( fixed_point64::add(for_x, for_y ) ) as u64)
     }
 
     // Computes coins to be sent out when withdrawing liquidity
@@ -111,10 +150,10 @@ module legato_addr::weighted_math {
         weight_y: u64
     ): (u64, u64) {
  
-        let amount_x = lp_for_token( fixed_point64::multiply_u128( (lp_amount as u128), fixed_point64::create_from_rational( (weight_x as u128), (WEIGHT_SCALE as u128) ) ) , lp_supply, reserve_x, weight_x );
-        let amount_y = lp_for_token( fixed_point64::multiply_u128( (lp_amount as u128), fixed_point64::create_from_rational( (weight_y as u128), (WEIGHT_SCALE as u128) ) ), lp_supply, reserve_y, weight_y );
+        let amount_x = lp_for_token( (lp_amount/2 as u128) , lp_supply, reserve_x, weight_x );
+        let amount_y =  lp_for_token( (lp_amount/2 as u128)  , lp_supply, reserve_y, weight_y );
 
-        ((amount_x),(amount_y))
+        ((amount_x as u64),(amount_y as u64))
     }
 
     // Calculates the amount of output coins to receive from a given LP amount 
@@ -129,7 +168,7 @@ module legato_addr::weighted_math {
         let base = fixed_point64::create_from_rational( ((lp_supply-(lp_amount as u64)) as u128), (lp_supply as u128) );
         let power = power(base, fixed_point64::create_from_rational( (WEIGHT_SCALE as u128), (weight as u128) ) );
 
-        (fixed_point64::multiply_u128( (reserve as u128) ,  fixed_point64::sub( fixed_point64::create_from_u128(1), power )  ) as u64)
+        ( (fixed_point64::multiply_u128( (reserve as u128) ,  fixed_point64::sub( fixed_point64::create_from_u128(1), power )  )) as u64)
     }
 
     // Calculates the amount of LP tokens to receive from a given coins.
@@ -139,35 +178,14 @@ module legato_addr::weighted_math {
         reserve: u64,
         weight: u64,
         lp_supply: u64
-    ) : u64 {
+    ) : FixedPoint64 {
 
         let base = fixed_point64::create_from_rational( ( (reserve+amount) as u128 ), (reserve as u128) );
-        let power = power(base,  fixed_point64::create_from_rational( (weight as u128), (WEIGHT_SCALE as u128) ) );
+        let power = power(base,  fixed_point64::create_from_rational( (weight as u128), (WEIGHT_SCALE as u128) ) ); 
 
-        (fixed_point64::multiply_u128( (lp_supply as u128) ,  fixed_point64::sub( power,  fixed_point64::create_from_u128(1) )  ) as u64)
-    }
-
-    // Function to assert that the LP value
-    public fun assert_lp_value_is_increased( 
-        weight_x: u64,
-        weight_y: u64, 
-        old_reserve_x: u64,
-        old_reserve_y: u64,
-        new_reserve_x: u64,
-        new_reserve_y: u64,
-    ) {
-        
-        // Compute the LP value using old and new reserves
-        let old_lp_value = compute_initial_lp( weight_x, weight_y, old_reserve_x, old_reserve_y);
-        let new_lp_value = compute_initial_lp( weight_x, weight_y,  new_reserve_x, new_reserve_y);
-        
-        // Assert that the new LP value is greater than or equal the old LP value 
-        assert!(
-            fixed_point64::greater_or_equal( fixed_point64::create_from_rational( (old_lp_value as u128), (new_lp_value as u128) ) , fixed_point64::create_from_rational( 99, 100 ) ),
-            ERR_INCORRECT_SWAP
-        )
-        
-    }
+        // fixed_point64::multiply_u128( (lp_supply as u128) ,  fixed_point64::sub( power,  fixed_point64::create_from_u128(1) )  )
+        math_fixed64::mul_div(  fixed_point64::create_from_u128(  (lp_supply as u128) ), fixed_point64::sub( power,  fixed_point64::create_from_u128(1) ), fixed_point64::create_from_u128(1)  )
+    } 
 
     // Helper function to calculate the power of a FixedPoint64 number to a FixedPoint64 exponent
     // - When `n` is > 1, it uses the formula `exp(y * ln(x))` instead of `x^y`.

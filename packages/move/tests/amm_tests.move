@@ -26,15 +26,13 @@ module legato_addr::amm_tests {
     #[test_only]
     const BTC_AMOUNT: u64 = 180_000_000;  // 1.8 BTC at 90%
 
+    // Registering pools
     #[test(deployer = @legato_addr, lp_provider = @0xdead, user = @0xbeef )]
     fun test_register_pools(deployer: &signer, lp_provider: &signer, user: &signer) {
-
         register_pools(deployer, lp_provider, user);
- 
-        add_remove_liquidity(deployer,  lp_provider );
-
     }
 
+    // Swapping tokens
     #[test(deployer = @legato_addr, lp_provider = @0xdead, user = @0xbeef )]
     fun test_swap(deployer: &signer, lp_provider: &signer, user: &signer) {
 
@@ -45,6 +43,12 @@ module legato_addr::amm_tests {
         let user_address = signer::address_of(user);
         
         assert!(coin::balance<XBTC>(user_address) == 39754, ERR_UNKNOWN); // 0.00039754 BTC at ~50,536 BTC/USDT
+    }
+
+    // Removing liquidity
+    #[test(deployer = @legato_addr, lp_provider = @0xdead, user = @0xbeef )]
+    fun test_remove_liquidity(deployer: &signer, lp_provider: &signer, user: &signer) {
+        add_remove_liquidity(deployer,  lp_provider, user );
     }
 
     #[test_only]
@@ -100,21 +104,22 @@ module legato_addr::amm_tests {
     }
 
     #[test_only]
-    public fun add_remove_liquidity(deployer: &signer, lp_provider: &signer) {
+    public fun add_remove_liquidity(deployer: &signer, lp_provider: &signer, user: &signer) {
         
+        register_pools(deployer, lp_provider, user);
+
         let lp_provider_address = signer::address_of(lp_provider);
 
         amm::add_liquidity<USDT, XBTC>(
             lp_provider,
-            USDT_AMOUNT/20, // 500 USDT
+            2500_000000, // 2500 USDT
             1,
-            BTC_AMOUNT/20, // 0.09 XBTC
-            1
-        );
+            6000000, // 0.06 XBTC
+            1 
+        );    
 
         let lp_amount = coin::balance<LP<USDT, XBTC>>(lp_provider_address);
-
-        assert!(lp_amount == 13_390_722, ERR_UNKNOWN);
+        assert!(lp_amount == 13_920_844, ERR_UNKNOWN);
 
         // Transfer tokens out from the LP provider
         let usdt_amount = coin::balance<USDT>(lp_provider_address); 
@@ -128,11 +133,11 @@ module legato_addr::amm_tests {
             lp_amount
         );
 
-        usdt_amount = coin::balance<USDT>(lp_provider_address); 
-        assert!( usdt_amount == 487416859, ERR_UNKNOWN); // 487 USDT
+        usdt_amount = coin::balance<USDT>(lp_provider_address);  
+        assert!( usdt_amount == 2756_233173, ERR_UNKNOWN); // 2756 USDT
 
-        xbtc_amount = coin::balance<XBTC>(lp_provider_address); 
-        assert!(xbtc_amount == 8940828, ERR_UNKNOWN); // 0.089 XBTC
+        xbtc_amount = coin::balance<XBTC>(lp_provider_address);  
+        assert!(xbtc_amount == 5073305, ERR_UNKNOWN); // 0.0507 XBTC
 
     }
 
@@ -155,7 +160,5 @@ module legato_addr::amm_tests {
 
         mint_cap
     }
-
-     
 
 }
